@@ -1,0 +1,17 @@
+{
+  "name": "apex-rankmap-notifier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Notify a Discord channel when the Apex Legends ranked map rotates (GitHub Actions cron, zero-dependency).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node --env-file-if-exists=.env src/checkMap.js",
+    "check:mock": "USE_MOCK=true node --env-file-if-exists=.env src/checkMap.js",
+    "status": "MODE=status node --env-file-if-exists=.env src/checkMap.js",
+    "status:mock": "MODE=status USE_MOCK=true node --env-file-if-exists=.env src/checkMap.js"
+  },
+  "license": "MIT"
+}

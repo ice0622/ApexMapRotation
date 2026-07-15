@@ -1,0 +1,65 @@
+name: Check Apex ranked map
+
+on:
+  # 監視のみ。5分おきにチェックし、マップが変わったときだけ通知する。
+  schedule:
+    - cron: '*/5 * * * *'
+  # 手動実行（テスト・オンデマンドのステータス表示用）。
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'check = 変化時のみ通知 / status = 現在の状況＋残り時間を今すぐ通知'
+        type: choice
+        options:
+          - check
+          - status
+        default: check
+      use_mock:
+        description: 'ダミーデータを使う（APIキー無しで Discord 送信を確認）'
+        type: boolean
+        default: false
+
+# state/last_map.json を push するために必要。
+permissions:
+  contents: write
+
+# 実行を直列化し、重複実行による git push の競合を防ぐ。
+concurrency:
+  group: check-map
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # 実行時依存が無いため npm install は不要。
+
+      - name: Run map check
+        env:
+          APEX_API_KEY: ${{ secrets.APEX_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # schedule では inputs が null になるため既定値へフォールバック。
+          MODE: ${{ inputs.action || 'check' }}
+          USE_MOCK: ${{ inputs.use_mock && 'true' || '' }}
+        run: node src/checkMap.js
+
+      - name: Commit & push state if changed
+        run: |
+          if [ -n "$(git status --porcelain state/last_map.json)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state/last_map.json
+            git commit -m "chore(state): update ranked map [skip ci]"
+            # 直列化しているが念のため：他実行の push を取り込んでから push。
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            git push
+          else
+            echo "state に変更なし。コミットしません。"
+          fi
