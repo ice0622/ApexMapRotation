@@ -145,14 +145,22 @@ async function getCurrentMap(cfg, previousMap) {
   let res;
   try {
     res = await fetch(url, {
-      headers: { Accept: 'application/json' },
+      headers: {
+        // User-Agent が無いと Cloudflare 側で 406 を返すため明示する。
+        'User-Agent': 'ApexMapRotation (+https://github.com/ice0622/ApexMapRotation)',
+        Accept: 'application/json, */*',
+      },
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
     });
   } catch {
     // fetch のエラーオブジェクトは URL（＝キー）を含み得るので中身は出さない。
     throw new Error('map API request failed (network/timeout)');
   }
-  if (!res.ok) throw new Error(`map API returned HTTP ${res.status}`);
+  if (!res.ok) {
+    // 本文にキーは含まれない（キーはURLのクエリのみ）。原因特定のため先頭のみ出す。
+    const body = await res.text().catch(() => '');
+    throw new Error(`map API returned HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
 
   let data;
   try {
