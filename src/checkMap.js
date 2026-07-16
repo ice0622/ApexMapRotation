@@ -9,6 +9,8 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+// 通知の文面は messages.js に集約。文言を変えるときはそちらを編集する。
+import { buildChangeMessage, buildStatusMessage } from './messages.js';
 
 const STATE_PATH = fileURLToPath(new URL('../state/last_map.json', import.meta.url));
 const API_BASE = 'https://api.mozambiquehe.re/maprotation';
@@ -16,51 +18,6 @@ const HTTP_TIMEOUT_MS = 10_000;
 
 // モック時に使う仮想のローテーション。
 const MOCK_ROTATION = ['E-District', "World's Edge", 'Storm Point', 'Broken Moon'];
-
-// 英語マップ名 → 日本語表記。未登録のマップは英語のまま表示する。
-const JP_MAP_NAMES = {
-  "World's Edge": 'ワールズエッジ',
-  'E-District': 'Eディストリクト',
-  'Storm Point': 'ストームポイント',
-  'Broken Moon': 'ブロークンムーン',
-  'Kings Canyon': 'キングスキャニオン',
-  'Olympus': 'オリンパス',
-};
-
-// ---------------------------------------------------------------------------
-// 表示ヘルパ
-// ---------------------------------------------------------------------------
-
-// "World's Edge" -> "World's Edge（ワールズエッジ）"、未登録なら英語のみ。
-function formatMap(name) {
-  const jp = JP_MAP_NAMES[name];
-  return jp ? `${name}（${jp}）` : name;
-}
-
-// 分数 -> "約1時間23分" / "約45分"。null は null のまま返す。
-function humanizeMinutes(mins) {
-  if (mins == null || Number.isNaN(mins)) return null;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return h > 0 ? `約${h}時間${m}分` : `約${m}分`;
-}
-
-function buildChangeMessage(prevMap, current) {
-  const lines = [
-    '🗺️ ランクマップが変わりました',
-    `${formatMap(prevMap)}から ${formatMap(current.map)}に変更しました`,
-  ];
-  if (current.nextMap) lines.push(`次のマップは ${formatMap(current.nextMap)}です`);
-  return lines.join('\n');
-}
-
-function buildStatusMessage(current) {
-  const lines = ['🗺️ 現在のランクマップ情報', `現在のマップ: ${formatMap(current.map)}`];
-  if (current.nextMap) lines.push(`次のマップ: ${formatMap(current.nextMap)}`);
-  const remaining = humanizeMinutes(current.remainingMins);
-  if (remaining) lines.push(`次の変更まで: ${remaining}`);
-  return lines.join('\n');
-}
 
 // ---------------------------------------------------------------------------
 // 設定・状態
