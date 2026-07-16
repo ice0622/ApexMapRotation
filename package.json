@@ -8,10 +8,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --env-file-if-exists=.env src/checkMap.js",
-    "check:mock": "USE_MOCK=true node --env-file-if-exists=.env src/checkMap.js",
-    "status": "MODE=status node --env-file-if-exists=.env src/checkMap.js",
-    "status:mock": "MODE=status USE_MOCK=true node --env-file-if-exists=.env src/checkMap.js"
+    "check": "node --env-file-if-exists=.env src/jobs/checkMap.js",
+    "check:mock": "USE_MOCK=true node --env-file-if-exists=.env src/jobs/checkMap.js",
+    "status": "MODE=status node --env-file-if-exists=.env src/jobs/checkMap.js",
+    "status:mock": "MODE=status USE_MOCK=true node --env-file-if-exists=.env src/jobs/checkMap.js"
   },
   "license": "MIT"
 }

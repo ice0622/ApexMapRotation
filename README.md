@@ -17,6 +17,25 @@ GitHub Actions (5分おきの schedule)
 > **5分おきは「監視間隔」であって「通知間隔」ではありません。**
 > チェックは5分おきに走りますが、Discord への通知は**現在のマップが実際に変わったときだけ**です。変化がなければ何も送信しません。
 
+## ディレクトリ構成
+
+機能追加（ジョブ追加）を見越して「入り口」と「共通部品」を分けています。
+
+```
+src/
+├── jobs/            # 実行の入り口（1ジョブ = 1ファイル）
+│   └── checkMap.js  #   マップ変更通知
+└── lib/             # ジョブ間で共有する部品
+    ├── apexApi.js   #   Apex Legends Status API クライアント（キー秘匿込み）
+    ├── discord.js   #   Discord Webhook 送信
+    ├── state.js     #   state/ の読み書き
+    └── messages.js  #   通知の文面（文言を変えるならここ）
+state/               # 前回値などの永続データ（Actions が自動 commit）
+.github/workflows/   # ジョブごとのワークフロー
+```
+
+新しいジョブを足すときは `src/jobs/` にファイルを1つ、`.github/workflows/` にワークフローを1つ追加し、共通処理は `src/lib/` を使い回します。
+
 ## 通知メッセージ
 
 **マップが変わったとき（自動）:**
@@ -46,7 +65,7 @@ Storm Point（ストームポイント）
 
 マップ名は「英語（日本語）」併記。日本語表記の無い新規マップは英語のみで表示します。
 
-通知の文面はすべて [src/messages.js](src/messages.js) に集約しています。
+通知の文面はすべて [src/lib/messages.js](src/lib/messages.js) に集約しています。
 文言やラベルを変えたいときは `TEXT` 定数を、日本語マップ名を追加したいときは `JP_MAP_NAMES` を編集してください。
 
 ## セットアップ

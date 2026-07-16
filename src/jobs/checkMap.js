@@ -1,26 +1,25 @@
-// Apex Legends ランクマップ変更通知
+// Apex Legends ランクマップ変更通知（ジョブの入り口）
 //
 // cron（check モード）: 現在マップが前回と変わったときだけ Discord に通知する。
 // 手動（status モード）: 現在のマップ・次のマップ・残り時間をその場で Discord に出す。
 //
 // 依存パッケージは使わない（Node 24 のネイティブ fetch / AbortSignal.timeout を利用）。
 // 機密（APIキー・Webhook URL）は絶対にログへ出力しない。
+//
+// 共通部品は src/lib/ に分離している:
+//   apexApi.js  … API 呼び出し / discord.js … Webhook 送信
+//   state.js    … 前回値の永続化 / messages.js … 通知文面
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
-// 通知の文面は messages.js に集約。文言を変えるときはそちらを編集する。
-import { buildChangeMessage, buildStatusMessage } from './messages.js';
-
-const STATE_PATH = fileURLToPath(new URL('../state/last_map.json', import.meta.url));
-const API_BASE = 'https://api.mozambiquehe.re/maprotation';
-const HTTP_TIMEOUT_MS = 10_000;
+import { fetchRankedMap } from '../lib/apexApi.js';
+import { sendDiscordNotification } from '../lib/discord.js';
+import { readLastMap, writeLastMap } from '../lib/state.js';
+import { buildChangeMessage, buildStatusMessage } from '../lib/messages.js';
 
 // モック時に使う仮想のローテーション。
 const MOCK_ROTATION = ['E-District', "World's Edge", 'Storm Point', 'Broken Moon'];
 
 // ---------------------------------------------------------------------------
-// 設定・状態
+// 設定
 // ---------------------------------------------------------------------------
 
 function loadConfig() {
@@ -33,41 +32,9 @@ function loadConfig() {
   return { apiKey, webhook, useMock, explicitMock, mode };
 }
 
-async function readState() {
-  try {
-    const parsed = JSON.parse(await readFile(STATE_PATH, 'utf8'));
-    // map が非空文字列のときだけ「前回値あり」とみなす。
-    if (parsed && typeof parsed.map === 'string' && parsed.map.length > 0) return parsed;
-    return null;
-  } catch (err) {
-    if (err.code === 'ENOENT') return null; // 初回実行
-    console.warn(`state ファイルを読めませんでした（${err.message}）。初回扱いにします。`);
-    return null; // 壊れたファイルは初回扱いで再シード（クラッシュさせない）
-  }
-}
-
-async function writeState(map) {
-  const state = { map, updatedAt: new Date().toISOString() };
-  await mkdir(dirname(STATE_PATH), { recursive: true });
-  await writeFile(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-}
-
 // ---------------------------------------------------------------------------
 // マップ取得
 // ---------------------------------------------------------------------------
-
-// "01:23:45" -> 83（分）。分に満たない端数は切り捨て。
-function timerStringToMinutes(timer) {
-  if (typeof timer !== 'string') return null;
-  const parts = timer.split(':').map((n) => Number.parseInt(n, 10));
-  if (parts.some(Number.isNaN)) return null;
-  let seconds = 0;
-  if (parts.length === 3) seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
-  else if (parts.length === 2) seconds = parts[0] * 60 + parts[1];
-  else if (parts.length === 1) seconds = parts[0];
-  else return null;
-  return Math.floor(seconds / 60);
-}
 
 function getMockMap(previousMap, explicitMock) {
   const rotation = MOCK_ROTATION;
@@ -96,66 +63,7 @@ function getMockMap(previousMap, explicitMock) {
 
 async function getCurrentMap(cfg, previousMap) {
   if (cfg.useMock) return getMockMap(previousMap, cfg.explicitMock);
-
-  // 注意: この URL には APIキーが含まれる。絶対にログへ出さないこと。
-  const url = `${API_BASE}?auth=${encodeURIComponent(cfg.apiKey)}&version=2`;
-  let res;
-  try {
-    res = await fetch(url, {
-      headers: {
-        // User-Agent が無いと Cloudflare 側で 406 を返すため明示する。
-        'User-Agent': 'ApexMapRotation (+https://github.com/ice0622/ApexMapRotation)',
-        Accept: 'application/json, */*',
-      },
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    });
-  } catch {
-    // fetch のエラーオブジェクトは URL（＝キー）を含み得るので中身は出さない。
-    throw new Error('map API request failed (network/timeout)');
-  }
-  if (!res.ok) {
-    // 本文にキーは含まれない（キーはURLのクエリのみ）。原因特定のため先頭のみ出す。
-    const body = await res.text().catch(() => '');
-    throw new Error(`map API returned HTTP ${res.status}: ${body.slice(0, 200)}`);
-  }
-
-  let data;
-  try {
-    data = await res.json();
-  } catch {
-    throw new Error('map API returned malformed JSON');
-  }
-
-  const ranked = data?.ranked ?? {};
-  const map = ranked.current?.map;
-  if (typeof map !== 'string' || map.length === 0) {
-    throw new Error('map API response missing ranked.current.map');
-  }
-  const nextMap = typeof ranked.next?.map === 'string' && ranked.next.map.length > 0
-    ? ranked.next.map
-    : null;
-  const remainingMins = typeof ranked.current?.remainingMins === 'number'
-    ? ranked.current.remainingMins
-    : timerStringToMinutes(ranked.current?.remainingTimer);
-
-  return { map, nextMap, remainingMins };
-}
-
-// ---------------------------------------------------------------------------
-// Discord
-// ---------------------------------------------------------------------------
-
-async function sendDiscordNotification(webhook, content) {
-  const res = await fetch(webhook, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Discord webhook HTTP ${res.status} ${body.slice(0, 200)}`);
-  }
+  return fetchRankedMap(cfg.apiKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +76,7 @@ async function main() {
     `mode=${cfg.mode} / ${cfg.useMock ? `MOCK (explicit=${cfg.explicitMock})` : 'live API'}`,
   );
 
-  const previousMap = (await readState())?.map ?? null;
+  const previousMap = (await readLastMap())?.map ?? null;
 
   let current;
   try {
@@ -198,7 +106,7 @@ async function main() {
   // --- check モード: 変化時のみ通知 ---
   if (previousMap === null) {
     console.log(`初回実行: state を "${current.map}" にシード（通知なし）。`);
-    await writeState(current.map);
+    await writeLastMap(current.map);
     return 0;
   }
   if (previousMap === current.map) {
@@ -218,7 +126,7 @@ async function main() {
     console.error(`Discord 送信に失敗（state 未更新・次回リトライ）: ${err.message}`);
     return 1;
   }
-  await writeState(current.map);
+  await writeLastMap(current.map);
   console.log(`通知しました: ${previousMap} -> ${current.map}`);
   return 0;
 }

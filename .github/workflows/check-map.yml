@@ -48,7 +48,7 @@ jobs:
           # schedule では inputs が null になるため既定値へフォールバック。
           MODE: ${{ inputs.action || 'check' }}
           USE_MOCK: ${{ inputs.use_mock && 'true' || '' }}
-        run: node src/checkMap.js
+        run: node src/jobs/checkMap.js
 
       - name: Commit & push state if changed
         run: |
