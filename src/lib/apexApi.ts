@@ -8,13 +8,32 @@ const HTTP_TIMEOUT_MS = 10_000;
 // User-Agent が無いと Cloudflare 側で 406 を返すため明示する。
 const USER_AGENT = 'ApexMapRotation (+https://github.com/ice0622/ApexMapRotation)';
 
+// ランクマップのローテーション情報。
+export type RankedMap = {
+  map: string;
+  nextMap: string | null;
+  remainingMins: number | null;
+};
+
+// /maprotation レスポンスの想定形。実際の値は実行時に検証する。
+type MapRotationResponse = {
+  ranked?: {
+    current?: { map?: unknown; remainingMins?: unknown; remainingTimer?: unknown };
+    next?: { map?: unknown };
+  };
+};
+
 // API へ GET し、パース済み JSON を返す。失敗時はキーを含まないメッセージで throw。
-async function apiGet(path, params, apiKey) {
+async function apiGet(
+  path: string,
+  params: Record<string, string>,
+  apiKey: string,
+): Promise<unknown> {
   const url = new URL(path, API_ORIGIN);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   url.searchParams.set('auth', apiKey);
 
-  let res;
+  let res: Response;
   try {
     res = await fetch(url, {
       headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, */*' },
@@ -37,7 +56,7 @@ async function apiGet(path, params, apiKey) {
 }
 
 // "01:23:45" -> 83（分）。分に満たない端数は切り捨て。
-function timerStringToMinutes(timer) {
+function timerStringToMinutes(timer: unknown): number | null {
   if (typeof timer !== 'string') return null;
   const parts = timer.split(':').map((n) => Number.parseInt(n, 10));
   if (parts.some(Number.isNaN)) return null;
@@ -50,19 +69,19 @@ function timerStringToMinutes(timer) {
 }
 
 // ランクマップのローテーション情報 { map, nextMap, remainingMins } を返す。
-export async function fetchRankedMap(apiKey) {
-  const data = await apiGet('/maprotation', { version: '2' }, apiKey);
+export async function fetchRankedMap(apiKey: string): Promise<RankedMap> {
+  const data = (await apiGet('/maprotation', { version: '2' }, apiKey)) as MapRotationResponse;
 
   const ranked = data?.ranked ?? {};
   const map = ranked.current?.map;
   if (typeof map !== 'string' || map.length === 0) {
     throw new Error('map API response missing ranked.current.map');
   }
-  const nextMap = typeof ranked.next?.map === 'string' && ranked.next.map.length > 0
-    ? ranked.next.map
-    : null;
-  const remainingMins = typeof ranked.current?.remainingMins === 'number'
-    ? ranked.current.remainingMins
+  const rawNext = ranked.next?.map;
+  const nextMap = typeof rawNext === 'string' && rawNext.length > 0 ? rawNext : null;
+  const rawMins = ranked.current?.remainingMins;
+  const remainingMins = typeof rawMins === 'number'
+    ? rawMins
     : timerStringToMinutes(ranked.current?.remainingTimer);
 
   return { map, nextMap, remainingMins };

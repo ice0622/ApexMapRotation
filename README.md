@@ -24,15 +24,19 @@ GitHub Actions (5分おきの schedule)
 ```
 src/
 ├── jobs/            # 実行の入り口（1ジョブ = 1ファイル）
-│   └── checkMap.js  #   マップ変更通知
+│   └── checkMap.ts  #   マップ変更通知
 └── lib/             # ジョブ間で共有する部品
-    ├── apexApi.js   #   Apex Legends Status API クライアント（キー秘匿込み）
-    ├── discord.js   #   Discord Webhook 送信
-    ├── state.js     #   state/ の読み書き
-    └── messages.js  #   通知の文面（文言を変えるならここ）
+    ├── apexApi.ts   #   Apex Legends Status API クライアント（キー秘匿込み）
+    ├── discord.ts   #   Discord Webhook 送信
+    ├── state.ts     #   state/ の読み書き
+    └── messages.ts  #   通知の文面（文言を変えるならここ）
 state/               # 前回値などの永続データ（Actions が自動 commit）
+tsconfig.json        # 型チェック用（ビルドには使わない）
 .github/workflows/   # ジョブごとのワークフロー
 ```
+
+TypeScript で書かれていますが**ビルドはありません**。Node 24 が `.ts` をそのまま実行します
+（ネイティブ type stripping）。`tsc` は型チェック専用です（`npm run typecheck`）。
 
 新しいジョブを足すときは `src/jobs/` にファイルを1つ、`.github/workflows/` にワークフローを1つ追加し、共通処理は `src/lib/` を使い回します。
 
@@ -65,7 +69,7 @@ Storm Point（ストームポイント）
 
 マップ名は「英語（日本語）」併記。日本語表記の無い新規マップは英語のみで表示します。
 
-通知の文面はすべて [src/lib/messages.js](src/lib/messages.js) に集約しています。
+通知の文面はすべて [src/lib/messages.ts](src/lib/messages.ts) に集約しています。
 文言やラベルを変えたいときは `TEXT` 定数を、日本語マップ名を追加したいときは `JP_MAP_NAMES` を編集してください。
 
 ## セットアップ
@@ -103,6 +107,8 @@ gh workflow run check-map.yml -f action=status
 
 ## ローカル開発
 
+**Node 24 以上が必要です**（`.ts` の直接実行のため）。実行だけなら `npm install` は不要です。
+
 ```bash
 cp .env.example .env
 # .env の DISCORD_WEBHOOK_URL に本物の Webhook を入れると実際に通知が届く
@@ -111,6 +117,9 @@ npm run check         # 通常のチェック（変化時のみ通知）
 npm run check:mock    # ダミーデータで変更通知をテスト
 npm run status        # 現在の状況＋残り時間を通知
 npm run status:mock   # ダミーデータでステータス通知をテスト
+
+npm ci                # 型チェックを使う場合のみ（typescript を入れる）
+npm run typecheck     # 型チェック（CI でも push 時に自動実行）
 ```
 
 `npm run check:mock` を2回実行すると、1回目は state をシード（通知なし）、2回目でマップが変わったとみなして通知が届きます。
@@ -124,6 +133,13 @@ npm run status:mock   # ダミーデータでステータス通知をテスト
 
 - **自動モック**（キー未設定）: 固定マップを返すのでスケジュール実行は静かなまま。
 - **明示モック**（`USE_MOCK=true`）: 前回の「次のマップ」を返すので必ず変化が起き、通知の疎通を確認できます。
+
+## 依存関係とサプライチェーン対策
+
+- **実行時依存はゼロ**です。本番（Actions の cron）は `npm install` 自体を行わず、Node 24 が `.ts` を直接実行します。
+- devDependencies は `typescript` と `@types/node` の2つだけ（型チェック専用・バージョン完全固定・どちらも install スクリプトなし）。
+- [.npmrc](.npmrc) で `ignore-scripts=true`（install スクリプトの自動実行を禁止）と `save-exact=true` を設定済み。
+- CI の型チェック（[typecheck.yml](.github/workflows/typecheck.yml)）は `permissions: contents: read` のみで、シークレットにアクセスできません。
 
 ## 状態管理
 

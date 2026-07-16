@@ -1,0 +1,21 @@
+{
+  // Node 24 のネイティブ実行（type stripping）前提の設定。
+  // tsc はビルドには使わず、型チェック専用（noEmit）。
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    // Node がそのまま実行できる = 型注釈を剥がすだけで動く構文に限定する。
+    "erasableSyntaxOnly": true,
+    // import は実ファイル名（.ts）で書く（Node のネイティブ実行の要件）。
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}

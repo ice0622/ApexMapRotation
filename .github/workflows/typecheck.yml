@@ -1,0 +1,39 @@
+name: Type check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tsconfig.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/typecheck.yml'
+  pull_request:
+  workflow_dispatch:
+
+# 読み取り専用。シークレットも書き込み権限も与えない
+# （devDependencies が万一汚染されても、このジョブから盗める・壊せるものを無くす）。
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # .npmrc の ignore-scripts=true により install スクリプトは実行されない。
+      # lockfile 完全一致インストール（改ざん・すり替わりは integrity 検証で失敗する）。
+      - name: Install dev tools
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck

@@ -1,8 +1,10 @@
 // Discord に送るメッセージの「文面」をまとめたモジュール。
 // 通知の文言・レイアウトを変えたいときは、このファイルだけを編集すればよい。
 
+import type { RankedMap } from './apexApi.ts';
+
 // 英語マップ名 → 日本語表記。未登録のマップは英語のまま表示する。
-export const JP_MAP_NAMES = {
+export const JP_MAP_NAMES: Record<string, string> = {
   "World's Edge": 'ワールズエッジ',
   'E-District': 'Eディストリクト',
   'Storm Point': 'ストームポイント',
@@ -25,13 +27,13 @@ export const TEXT = {
 export const TIME_ZONE = 'Asia/Tokyo';
 
 // "World's Edge" -> "World's Edge（ワールズエッジ）"、未登録なら英語のみ。
-export function formatMap(name) {
+export function formatMap(name: string): string {
   const jp = JP_MAP_NAMES[name];
   return jp ? `${name}（${jp}）` : name;
 }
 
 // 分数 -> "約1時間23分" / "約45分"。null は null のまま返す。
-export function humanizeMinutes(mins) {
+export function humanizeMinutes(mins: number | null | undefined): string | null {
   if (mins == null || Number.isNaN(mins)) return null;
   const h = Math.floor(mins / 60);
   const m = mins % 60;
@@ -39,12 +41,12 @@ export function humanizeMinutes(mins) {
 }
 
 // Discord の太字（マークダウン）。
-function bold(text) {
+function bold(text: string): string {
   return `**${text}**`;
 }
 
 // 残り分数から次の切替時刻を "21:45" 形式（TIME_ZONE 基準）で返す。不明なら null。
-function formatSwitchTime(remainingMins) {
+function formatSwitchTime(remainingMins: number | null): string | null {
   if (remainingMins == null || Number.isNaN(remainingMins)) return null;
   const at = new Date(Date.now() + remainingMins * 60_000);
   return new Intl.DateTimeFormat('ja-JP', {
@@ -56,7 +58,7 @@ function formatSwitchTime(remainingMins) {
 }
 
 // "次（21:45）" のラベル。切替時刻が不明なら "次" だけ。
-function nextLabel(remainingMins) {
+function nextLabel(remainingMins: number | null): string {
   const time = formatSwitchTime(remainingMins);
   return time ? `${TEXT.nextLabel}（${time}）` : TEXT.nextLabel;
 }
@@ -69,7 +71,7 @@ function nextLabel(remainingMins) {
 //   World's Edge（ワールズエッジ）
 //   **次（21:45）**
 //   Storm Point（ストームポイント）
-export function buildChangeMessage(prevMap, current) {
+export function buildChangeMessage(prevMap: string, current: RankedMap): string {
   const lines = [
     TEXT.changeTitle,
     bold(TEXT.prevLabel),
@@ -90,7 +92,7 @@ export function buildChangeMessage(prevMap, current) {
 //   **次（21:45）**
 //   Storm Point（ストームポイント）
 //   （次の切替まで 約1時間23分）
-export function buildStatusMessage(current) {
+export function buildStatusMessage(current: RankedMap): string {
   const lines = [TEXT.statusTitle, bold(TEXT.currentLabel), formatMap(current.map)];
   if (current.nextMap) {
     lines.push(bold(nextLabel(current.remainingMins)), formatMap(current.nextMap));

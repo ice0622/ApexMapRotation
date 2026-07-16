@@ -3,17 +3,19 @@
 // cron（check モード）: 現在マップが前回と変わったときだけ Discord に通知する。
 // 手動（status モード）: 現在のマップ・次のマップ・残り時間をその場で Discord に出す。
 //
-// 依存パッケージは使わない（Node 24 のネイティブ fetch / AbortSignal.timeout を利用）。
+// TypeScript のまま Node 24 で直接実行する（ネイティブ type stripping、ビルド不要）。
+// 実行時の依存パッケージはゼロ（ネイティブ fetch / AbortSignal.timeout を利用）。
 // 機密（APIキー・Webhook URL）は絶対にログへ出力しない。
 //
 // 共通部品は src/lib/ に分離している:
-//   apexApi.js  … API 呼び出し / discord.js … Webhook 送信
-//   state.js    … 前回値の永続化 / messages.js … 通知文面
+//   apexApi.ts  … API 呼び出し / discord.ts … Webhook 送信
+//   state.ts    … 前回値の永続化 / messages.ts … 通知文面
 
-import { fetchRankedMap } from '../lib/apexApi.js';
-import { sendDiscordNotification } from '../lib/discord.js';
-import { readLastMap, writeLastMap } from '../lib/state.js';
-import { buildChangeMessage, buildStatusMessage } from '../lib/messages.js';
+import { fetchRankedMap } from '../lib/apexApi.ts';
+import type { RankedMap } from '../lib/apexApi.ts';
+import { sendDiscordNotification } from '../lib/discord.ts';
+import { readLastMap, writeLastMap } from '../lib/state.ts';
+import { buildChangeMessage, buildStatusMessage } from '../lib/messages.ts';
 
 // モック時に使う仮想のローテーション。
 const MOCK_ROTATION = ['E-District', "World's Edge", 'Storm Point', 'Broken Moon'];
@@ -22,7 +24,15 @@ const MOCK_ROTATION = ['E-District', "World's Edge", 'Storm Point', 'Broken Moon
 // 設定
 // ---------------------------------------------------------------------------
 
-function loadConfig() {
+type Config = {
+  apiKey: string;
+  webhook: string;
+  useMock: boolean;
+  explicitMock: boolean;
+  mode: 'check' | 'status';
+};
+
+function loadConfig(): Config {
   const apiKey = (process.env.APEX_API_KEY ?? '').trim();
   const webhook = (process.env.DISCORD_WEBHOOK_URL ?? '').trim();
   const explicitMock = process.env.USE_MOCK === 'true';
@@ -36,19 +46,20 @@ function loadConfig() {
 // マップ取得
 // ---------------------------------------------------------------------------
 
-function getMockMap(previousMap, explicitMock) {
+function getMockMap(previousMap: string | null, explicitMock: boolean): RankedMap {
   const rotation = MOCK_ROTATION;
-  let idx;
-  if (process.env.MOCK_MAP) {
+  const mockMap = process.env.MOCK_MAP;
+  if (mockMap) {
     return {
-      map: process.env.MOCK_MAP,
+      map: mockMap,
       nextMap: rotation[0],
       remainingMins: 83,
     };
   }
+  let idx: number;
   if (explicitMock) {
     // 明示モック（テスト意図）: 前回の「次」を返す → 必ず変化が起き通知が発火する。
-    const prevIdx = rotation.indexOf(previousMap);
+    const prevIdx = previousMap === null ? -1 : rotation.indexOf(previousMap);
     idx = (prevIdx + 1 + rotation.length) % rotation.length;
   } else {
     // 自動モック（キー未設定）: 固定値 → 初回シードのみで以降は静か。
@@ -61,7 +72,7 @@ function getMockMap(previousMap, explicitMock) {
   };
 }
 
-async function getCurrentMap(cfg, previousMap) {
+async function getCurrentMap(cfg: Config, previousMap: string | null): Promise<RankedMap> {
   if (cfg.useMock) return getMockMap(previousMap, cfg.explicitMock);
   return fetchRankedMap(cfg.apiKey);
 }
@@ -70,7 +81,7 @@ async function getCurrentMap(cfg, previousMap) {
 // メイン
 // ---------------------------------------------------------------------------
 
-async function main() {
+async function main(): Promise<number> {
   const cfg = loadConfig();
   console.log(
     `mode=${cfg.mode} / ${cfg.useMock ? `MOCK (explicit=${cfg.explicitMock})` : 'live API'}`,
@@ -78,11 +89,11 @@ async function main() {
 
   const previousMap = (await readLastMap())?.map ?? null;
 
-  let current;
+  let current: RankedMap;
   try {
     current = await getCurrentMap(cfg, previousMap);
   } catch (err) {
-    console.error(`マップ取得に失敗（スキップ）: ${err.message}`);
+    console.error(`マップ取得に失敗（スキップ）: ${(err as Error).message}`);
     // check は静かに緑のまま / status は手動操作なので失敗を可視化する。
     return cfg.mode === 'status' ? 1 : 0;
   }
@@ -96,7 +107,7 @@ async function main() {
     try {
       await sendDiscordNotification(cfg.webhook, buildStatusMessage(current));
     } catch (err) {
-      console.error(`Discord 送信に失敗: ${err.message}`);
+      console.error(`Discord 送信に失敗: ${(err as Error).message}`);
       return 1;
     }
     console.log(`ステータス通知を送信しました（現在: ${current.map}）。`);
@@ -123,7 +134,7 @@ async function main() {
     await sendDiscordNotification(cfg.webhook, buildChangeMessage(previousMap, current));
   } catch (err) {
     // state はあえて更新しない → 次回実行で再検知・再送信（自己修復）。
-    console.error(`Discord 送信に失敗（state 未更新・次回リトライ）: ${err.message}`);
+    console.error(`Discord 送信に失敗（state 未更新・次回リトライ）: ${(err as Error).message}`);
     return 1;
   }
   await writeLastMap(current.map);
@@ -134,6 +145,6 @@ async function main() {
 main()
   .then((code) => process.exit(code))
   .catch((err) => {
-    console.error('想定外のエラー:', err?.message ?? err);
+    console.error('想定外のエラー:', (err as Error)?.message ?? err);
     process.exit(1);
   });

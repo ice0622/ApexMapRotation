@@ -4,7 +4,7 @@
 
 const HTTP_TIMEOUT_MS = 10_000;
 
-export async function sendDiscordNotification(webhook, content) {
+export async function sendDiscordNotification(webhook: string, content: string): Promise<void> {
   const res = await fetch(webhook, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -2,16 +2,21 @@
   "name": "apex-rankmap-notifier",
   "version": "1.0.0",
   "private": true,
-  "description": "Notify a Discord channel when the Apex Legends ranked map rotates (GitHub Actions cron, zero-dependency).",
+  "description": "Notify a Discord channel when the Apex Legends ranked map rotates (GitHub Actions cron, zero runtime dependencies).",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
-    "check": "node --env-file-if-exists=.env src/jobs/checkMap.js",
-    "check:mock": "USE_MOCK=true node --env-file-if-exists=.env src/jobs/checkMap.js",
-    "status": "MODE=status node --env-file-if-exists=.env src/jobs/checkMap.js",
-    "status:mock": "MODE=status USE_MOCK=true node --env-file-if-exists=.env src/jobs/checkMap.js"
+    "check": "node --env-file-if-exists=.env src/jobs/checkMap.ts",
+    "check:mock": "USE_MOCK=true node --env-file-if-exists=.env src/jobs/checkMap.ts",
+    "status": "MODE=status node --env-file-if-exists=.env src/jobs/checkMap.ts",
+    "status:mock": "MODE=status USE_MOCK=true node --env-file-if-exists=.env src/jobs/checkMap.ts",
+    "typecheck": "tsc --noEmit"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3"
+  }
 }
