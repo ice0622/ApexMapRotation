@@ -3,25 +3,25 @@
 // API が返すのは「今の枠」と「次の枠」の2つだけなので、1日分（4.5時間枠なら6〜7枠）は
 // ここで外挿する。材料は2つ:
 //   枠長   … API の current / next の実測（最優先。推測値は使わない）
-//   並び順 … 下の RANKED_MAP_POOL（集合）と観測から毎回導出する
+//   並び順 … キャッシュに覚えており、実行のたびに観測で検算・更新する
 //
-// 定数として持つのは「どの3マップか」という集合だけで、並び順は持たない。
-// 3マップなら観測1組から並びが一意に決まるため（resolveCycle 参照）、
-// 順序だけが変わるシーズン更新には手を加えずに追従できる。
+// 並びは実行のたびに API の観測で検算し、ずれていたら自動で直す（applyObservation）。
+// ランクのローテーションは「順序は変わらず、マップの顔ぶれだけが入れ替わる」ので、
+// A -> D を1回観測すれば「A の次だった B が D になった」と確定できる。
+// つまり集合を貯めて一巡待つ必要がなく、枠が変わった瞬間に復旧する。
 
 import type { RankedRotation, RotationSlot } from './apexApi.ts';
 
 // ---------------------------------------------------------------------------
-// ランクに出るマップの集合（顔ぶれが変わったら手で書き換える）
+// ローテーションの初期値（キャッシュが空のときだけ使う種）
 // ---------------------------------------------------------------------------
 //
-// **順序は不問**。並びは毎回 API の観測から resolveCycle が決める。
-// 名前は API が返す英語表記と完全に一致させること（日本語表示は messages.ts の
-// JP_MAP_NAMES が担当する）。
+// 生きている並びは Actions のキャッシュ側にあり、実行のたびに観測で更新される。
+// ここを人が書き換える必要は無い。キャッシュを失ったときの出発点でしかなく、
+// これが古くても数時間の観測で正しい並びへ復帰する。
 //
-// ここに無いマップを API が返したらランクの構成が変わっている。そのときは
-// 外挿をやめて確定分だけを投稿し、ジョブを失敗扱いにして GitHub から通知する。
-export const RANKED_MAP_POOL = ["World's Edge", 'Storm Point', 'E-District'];
+// 名前は API が返す英語表記に合わせること（日本語表示は messages.ts の JP_MAP_NAMES）。
+export const INITIAL_ROTATION = ["World's Edge", 'Storm Point', 'E-District'];
 
 // Asia/Tokyo はサマータイムが無いので固定オフセットで正確に計算できる。
 // Intl で日付を分解して組み直すより単純で、丸め誤差も入らない。
@@ -31,6 +31,8 @@ export const DAY_MS = 24 * 60 * 60 * 1000;
 
 // 枠長が壊れた値（極端に短い等）でも無限ループしないための上限。
 const MAX_SLOTS_PER_DAY = 48;
+// 観測が矛盾していても辿り続けないための上限。
+const MAX_CYCLE_LENGTH = 16;
 
 // 指定時刻を含む JST の日の 00:00 を UNIX ミリ秒で返す。
 export function jstDayStart(atMs: number): number {
@@ -48,50 +50,113 @@ function cycleAt(cycle: string[], index: number): string {
   return cycle[((index % n) + n) % n];
 }
 
-export type CycleResolution = {
-  // 並びが決まらなければ null。呼び出し側は外挿をやめて実測の枠だけを出す。
-  cycle: string[] | null;
-  warnings: string[];
+// 観測（map -> 次のmap）を辿って循環が閉じるか試す。閉じたらその並びを返す。
+// 途中で未知に当たる・別の場所へ合流する場合は null。
+// 閉路に乗らなかったマップは前のローテーションの残骸なので落とす。
+function closeCycle(observed: Record<string, string>, startMap: string): string[] | null {
+  const maps = [startMap];
+  const visited = new Set([startMap]);
+  let node = startMap;
+
+  while (maps.length <= MAX_CYCLE_LENGTH) {
+    const next = observed[node];
+    if (next === undefined) return null;
+    if (next === startMap) return maps;
+    if (visited.has(next)) return null;
+    maps.push(next);
+    visited.add(next);
+    node = next;
+  }
+  return null;
+}
+
+export type CycleState = {
+  // 判別できていれば並び、できていなければ空配列。
+  cycle: string[];
+  // 判別できないあいだ貯めておく観測。判別できたら空に戻す。
+  observed: Record<string, string>;
+  // 置き換え仮説で組んだ直後で、まだ次の観測で裏が取れていない状態。
+  provisional: boolean;
 };
 
-// 観測した1組（current -> next）と集合から、ローテーションの並びを組み立てる。
-//
-// 3マップなら観測1組で一意に決まる。{A,B,C} を全部回る循環で A->B が確定しているなら、
-// B の次は C しか残らない（A に戻ると C を飛ばしてしまう）。
-// だから並び順を定数で持つ必要はなく、「どの3マップか」だけ分かっていればよい。
-// 4マップ以上だと A->B の先が2通りありうるので、1組では決まらない。
-export function resolveCycle(pool: string[], rotation: RankedRotation): CycleResolution {
-  const { current, next } = rotation;
+export type CycleUpdate = CycleState & { note: string | null };
 
-  if (next === null) {
-    return { cycle: null, warnings: ['API が次の枠を返しませんでした。確定分だけを出します。'] };
-  }
-
-  const unknown = [current.map, next.map].filter((map) => !pool.includes(map));
-  if (unknown.length > 0) {
+// 観測を貯め、循環が閉じたら並びとして採用する。
+function accumulate(
+  observed: Record<string, string>,
+  current: string,
+  next: string,
+): CycleUpdate {
+  const acc = { ...observed, [current]: next };
+  const rebuilt = closeCycle(acc, current);
+  if (rebuilt !== null) {
     return {
-      cycle: null,
-      warnings: [
-        `${unknown.join(' / ')} が RANKED_MAP_POOL [${pool.join(', ')}] にありません。` +
-          `ランクのマップ構成が変わっています。src/lib/rotation.ts の RANKED_MAP_POOL を更新してください。`,
-      ],
+      cycle: rebuilt,
+      observed: {},
+      provisional: false,
+      note: `観測から並びを組み直しました: ${rebuilt.join(' -> ')}`,
     };
   }
-  if (current.map === next.map) {
-    return { cycle: null, warnings: [`API が同じマップを続けて返しました（${current.map}）。`] };
+  const known = Object.entries(acc).map(([from, to]) => `${from}->${to}`).join(', ');
+  return { cycle: [], observed: acc, provisional: false, note: `並びを判別中（判明分: ${known}）` };
+}
+
+// 観測した1組（current -> next）で、覚えている並びを検算・更新する。
+//
+// ランクのローテーションは順序が変わらず、マップの顔ぶれだけが入れ替わる。
+// だから「A の次が D だった」という観測1つで、A の次にいたマップが D に
+// 置き換わったと推測できる。ただしこれは「マップ数が変わっていない」ことを
+// 前提にした仮説なので、次の観測で裏を取るまでは暫定として扱う。
+//
+// 裏が取れなければ（マップ数が増減した・複数同時に入れ替わった・順序が変わった）、
+// 観測を貯めて循環が閉じるのを待つ方式へ落ちる。ここで置き換えを試し続けると、
+// マップが増えた場合に延々と入れ替えを繰り返して収束しない。
+export function applyObservation(
+  state: CycleState,
+  current: string,
+  next: string | null,
+): CycleUpdate {
+  const { cycle, observed, provisional } = state;
+  if (next === null || next === current) return { ...state, note: null };
+
+  const currentIdx = cycle.indexOf(current);
+  const nextIdx = cycle.indexOf(next);
+
+  // 1) 覚えている並びと一致した。暫定だったものはここで確定する。
+  if (currentIdx >= 0 && cycle[(currentIdx + 1) % cycle.length] === next) {
+    return {
+      cycle,
+      observed: {},
+      provisional: false,
+      note: provisional ? `並びを確認しました: [${cycle.join(' -> ')}]` : null,
+    };
   }
 
-  const rest = pool.filter((map) => map !== current.map && map !== next.map);
-  if (pool.length === 2 && rest.length === 0) return { cycle: [current.map, next.map], warnings: [] };
-  if (pool.length === 3 && rest.length === 1) {
-    return { cycle: [current.map, next.map, rest[0]], warnings: [] };
+  // 2) 暫定の並びが外れた。置き換え1回では説明できない変化なので、観測を貯めにいく。
+  if (provisional) return accumulate({}, current, next);
+
+  // 3) 1マップだけ入れ替わったという仮説を立てる。
+  if (currentIdx >= 0 && nextIdx < 0) {
+    const replaced = cycle[(currentIdx + 1) % cycle.length];
+    return {
+      cycle: cycle.map((map) => (map === replaced ? next : map)),
+      observed: {},
+      provisional: true,
+      note: `ローテーションが変わった可能性: ${replaced} -> ${next}（${current} の次）。暫定で反映します`,
+    };
   }
-  return {
-    cycle: null,
-    warnings: [
-      `マップ ${pool.length} 個では観測1組から並びが一意に決まりません（決まるのは2個か3個のときだけ）。`,
-    ],
-  };
+  if (nextIdx >= 0 && currentIdx < 0) {
+    const replaced = cycle[(nextIdx - 1 + cycle.length) % cycle.length];
+    return {
+      cycle: cycle.map((map) => (map === replaced ? current : map)),
+      observed: {},
+      provisional: true,
+      note: `ローテーションが変わった可能性: ${replaced} -> ${current}（${next} の前）。暫定で反映します`,
+    };
+  }
+
+  // 4) 仮説を立てられない。観測を貯める。
+  return accumulate(observed, current, next);
 }
 
 export type DaySchedule = {

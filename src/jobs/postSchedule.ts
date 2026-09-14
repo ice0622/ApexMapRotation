@@ -1,15 +1,16 @@
 // Apex Legends ランクマップの「1日のスケジュール」を Discord へ投稿するジョブ。
 //
-// 平常時は JST 0:00 に1通だけ送る。API は「今の枠」と「次の枠」しか返さないので、
-// 残りの枠は rotation.ts で外挿する。並びは RANKED_MAP_POOL（どの3マップか）と
-// API の観測から毎回その場で決まるため、順序だけが変わるシーズン更新には自動で追従する。
+// API は「今の枠」と「次の枠」しか返さないので、残りの枠は rotation.ts で外挿する。
+// 外挿に使う並びは Actions のキャッシュに覚えており、実行のたびに観測で検算・更新する。
+// ランクの順序は変わらずマップの顔ぶれだけが入れ替わるため、1回の観測で置き換えを
+// 特定でき、枠が変わった瞬間に自動復旧する。人が定数を直す必要は無い。
 //
-// マップの顔ぶれが変わって並びを判別できない日は、外挿をやめて実測の枠だけを投稿し、
-// 枠が変わるたびに投稿し直す。間違った1日分を出すより、短くても確実な分を出す。
+// 投稿するかどうかは「組み立てた文面が前回と違うか」だけで決める。
+//   同じ日・同じ並び → 文面が同一 → 投稿しない
+//   顔ぶれが変わった / 判別中から判明した / 日付が変わった → 文面が変わる → 投稿する
 //
-// cron は毎時。GitHub Actions の schedule は宣言どおりに走らない（実測で高頻度 cron は
-// 3%程度まで間引かれる）ので、毎時にしておけば取りこぼしても次の時間で取り返せる。
-// 完了済みの日は記録を読むだけで終わり、API も叩かない（平常時の API 呼び出しは1日1回）。
+// cron は毎時だが、覚えている枠の終了時刻を過ぎるまでは API を叩かない。
+// 結果、API 呼び出しは「枠が変わるたび＋日付が変わるとき」の1日6〜7回で済む。
 //
 // TypeScript のまま Node 24 で直接実行する（ネイティブ type stripping、ビルド不要）。
 // 実行時の依存パッケージはゼロ。機密（APIキー・Webhook URL）は絶対にログへ出力しない。
@@ -19,16 +20,19 @@ import { appendFile } from 'node:fs/promises';
 import { fetchRankedRotation } from '../lib/apexApi.ts';
 import type { RankedRotation } from '../lib/apexApi.ts';
 import { sendDiscordNotification } from '../lib/discord.ts';
-import { readMarker, writeMarker } from '../lib/postedMarker.ts';
+import { readMemory, writeMemory } from '../lib/memory.ts';
 import { getMockRotation } from '../lib/mockRotation.ts';
 import {
+  applyObservation,
   buildDaySchedule,
-  jstDateKey,
   jstDayStart,
-  resolveCycle,
-  RANKED_MAP_POOL,
+  DAY_MS,
+  INITIAL_ROTATION,
 } from '../lib/rotation.ts';
 import { buildScheduleMessage, twitterWeight, TWITTER_LIMIT } from '../lib/messages.ts';
+
+// API の値が壊れていても毎回叩きに行かないための下限。
+const MIN_RECHECK_MS = 5 * 60_000;
 
 type Config = {
   apiKey: string;
@@ -50,21 +54,10 @@ function loadConfig(): Config {
   };
 }
 
-// 投稿できたことをワークフローへ伝える。キャッシュの保存はこの出力を見て判断する。
-async function signalPosted(): Promise<void> {
+// キャッシュを保存すべきかをワークフローへ伝える。
+async function signalChanged(): Promise<void> {
   const out = process.env.GITHUB_OUTPUT;
-  if (out) await appendFile(out, 'posted=true\n');
-}
-
-// 並びを判別できなかった日は、投稿そのものが成功していても失敗扱いで終える。
-// ログに書くだけでは誰も見ないが、ジョブが赤くなれば GitHub から通知が届く。
-function exitCodeFor(partial: boolean): number {
-  if (!partial) return 0;
-  console.error(
-    'ランクのマップ構成が RANKED_MAP_POOL と一致していません。' +
-      '確定分の投稿は完了していますが、定数を直すまで失敗扱いにします。',
-  );
-  return 1;
+  if (out) await appendFile(out, 'changed=true\n');
 }
 
 async function main(): Promise<number> {
@@ -73,15 +66,12 @@ async function main(): Promise<number> {
 
   const nowMs = Date.now();
   const dayStartMs = jstDayStart(nowMs);
-  const today = jstDateKey(nowMs);
+  const memory = await readMemory(INITIAL_ROTATION);
 
-  const marker = await readMarker();
-  const sameDay = marker !== null && marker.date === today;
-
-  // 今日ぶんを完全な形で投稿済みなら、API も叩かずに終える。
-  // 毎時走らせても平常時の API 呼び出しが1日1回で済むのはこの分岐のおかげ。
-  if (sameDay && !marker.partial && !cfg.force) {
-    console.log(`本日（${today}）は投稿済みです。FORCE=true で再投稿できます。`);
+  // 枠も日付も変わっていなければ、出す内容は前回と同じにしかならない。API を叩かない。
+  if (nowMs < memory.nextCheckMs && !cfg.force) {
+    const waitMins = Math.ceil((memory.nextCheckMs - nowMs) / 60_000);
+    console.log(`枠も日付も変わっていません（あと約${waitMins}分）。API は叩きません。`);
     return 0;
   }
 
@@ -94,37 +84,52 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  // いちど判別不能だった日は、そのあとの観測がたまたま集合に収まっていても信用しない。
-  // 古い集合のまま消去法を使うと、抜けたはずのマップを含む「もっともらしいが
-  // 間違った1日分」を自信満々に出してしまう。
-  const poolTrusted = cfg.force || !(sameDay && marker.partial);
-  const resolved = poolTrusted
-    ? resolveCycle(RANKED_MAP_POOL, rotation)
-    : { cycle: null, warnings: ['本日は既に判別不能と判定済みのため、外挿しません。'] };
+  // 観測で並びを検算・更新する。顔ぶれが変わっていればここで自動的に直る。
+  const update = applyObservation(memory, rotation.current.map, rotation.next?.map ?? null);
+  if (update.note !== null) console.warn(`警告: ${update.note}`);
 
-  const schedule = buildDaySchedule({ rotation, cycle: resolved.cycle, dayStartMs });
-  for (const warning of [...resolved.warnings, ...schedule.warnings]) {
-    console.warn(`警告: ${warning}`);
-  }
-
-  // 判別できない日は枠が変わるたびに投稿し直すが、同じ枠のあいだは投げない。
-  if (sameDay && marker.partial && marker.slotStartMs === rotation.current.startMs && !cfg.force) {
-    console.log('確定分は投稿済みで、枠もまだ変わっていません。次の枠まで待ちます。');
-    return exitCodeFor(schedule.partial);
-  }
+  const cycle = update.cycle.length >= 2 ? update.cycle : null;
+  const schedule = buildDaySchedule({ rotation, cycle, dayStartMs });
+  for (const warning of schedule.warnings) console.warn(`警告: ${warning}`);
 
   const message = buildScheduleMessage(schedule.slots, dayStartMs, schedule.partial);
-  console.log(`---\n${message}\n---`);
+
+  // 次に確認すべき時刻。枠の終わりか日付が変わる時刻の早いほう。
+  const nextCheckMs = Math.max(
+    Math.min(rotation.current.endMs, dayStartMs + DAY_MS),
+    nowMs + MIN_RECHECK_MS,
+  );
+  const nextMemory = {
+    cycle: update.cycle,
+    observed: update.observed,
+    provisional: update.provisional,
+    lastMessage: memory.lastMessage,
+    nextCheckMs,
+  };
+
   console.log(
     `枠数=${schedule.slots.length} / 枠長=${schedule.slotMinutes}分 / ` +
       `観測=${rotation.current.map} -> ${rotation.next?.map ?? '(next なし)'} / ` +
-      `並び=${resolved.cycle === null ? '判別不能' : `[${resolved.cycle.join(' -> ')}]`} / ` +
-      `X換算=${twitterWeight(message)}/${TWITTER_LIMIT}`,
+      `並び=${cycle === null ? '判別中' : `[${cycle.join(' -> ')}]${update.provisional ? '（暫定）' : ''}`}`,
   );
 
+  // 出す内容が前回と同じなら投稿しない。この1行で「同じ日は1回だけ」も
+  // 「顔ぶれが変わったら出し直す」も「判別中から判明したら出し直す」もまかなえる。
+  if (message === memory.lastMessage && !cfg.force) {
+    console.log('前回と同じ内容なので投稿しません。');
+    if (!cfg.dryRun) {
+      await writeMemory(nextMemory);
+      await signalChanged();
+    }
+    return 0;
+  }
+
+  console.log(`---\n${message}\n---`);
+  console.log(`X換算=${twitterWeight(message)}/${TWITTER_LIMIT}`);
+
   if (cfg.dryRun) {
-    console.log('DRY_RUN のため送信しません。');
-    return exitCodeFor(schedule.partial);
+    console.log('DRY_RUN のため送信せず、記録も更新しません。');
+    return 0;
   }
   if (!cfg.webhook) {
     console.error('DISCORD_WEBHOOK_URL が未設定です。');
@@ -134,19 +139,15 @@ async function main(): Promise<number> {
   try {
     await sendDiscordNotification(cfg.webhook, message);
   } catch (err) {
-    // 記録を進めない → 次の時間の実行で再送される（自己修復）。
+    // lastMessage を進めない → 次の時間の実行で再送される（自己修復）。
     console.error(`Discord 送信に失敗（次回リトライ）: ${(err as Error).message}`);
     return 1;
   }
 
-  await writeMarker({
-    date: today,
-    partial: schedule.partial,
-    slotStartMs: rotation.current.startMs,
-  });
-  await signalPosted();
-  console.log(`投稿しました（${today} / ${schedule.slots.length}枠${schedule.partial ? '・確定分のみ' : ''}）。`);
-  return exitCodeFor(schedule.partial);
+  await writeMemory({ ...nextMemory, lastMessage: message });
+  await signalChanged();
+  console.log(`投稿しました（${schedule.slots.length}枠${schedule.partial ? '・確定分のみ' : ''}）。`);
+  return 0;
 }
 
 main()

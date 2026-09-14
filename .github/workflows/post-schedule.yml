@@ -46,14 +46,14 @@ jobs:
           node-version: '24'
       # 実行時依存が無いため npm install は不要。
 
-      # 「その日に何をどこまで投稿したか」の記録。毎日変わる値なのでコミットせず
-      # キャッシュに置く。失ってもその日にもう一度投稿する程度で自己修復する。
-      - name: Restore posted marker
+      # 覚えていること（並び・最後に投稿した文面・次に確認する時刻）。
+      # コミットせずキャッシュに置く。失っても数時間の観測で学習し直す。
+      - name: Restore memory
         uses: actions/cache/restore@v4
         with:
           path: .cache
-          key: posted-marker-${{ github.run_id }}
-          restore-keys: posted-marker-
+          key: memory-${{ github.run_id }}
+          restore-keys: memory-
 
       - name: Post schedule
         id: post
@@ -66,11 +66,11 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run && 'true' || '' }}
         run: node src/jobs/postSchedule.ts
 
-      # 実際に投稿できた回だけ保存する。キーは重複できないので run_id で一意にし、
+      # 中身が変わった回だけ保存する。キーは重複できないので run_id で一意にし、
       # 復元は restore-keys の前方一致で最新のものを拾う。
-      - name: Save posted marker
-        if: steps.post.outputs.posted == 'true'
+      - name: Save memory
+        if: steps.post.outputs.changed == 'true'
         uses: actions/cache/save@v4
         with:
           path: .cache
-          key: posted-marker-${{ github.run_id }}
+          key: memory-${{ github.run_id }}
