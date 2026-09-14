@@ -1,11 +1,9 @@
 // state/ ディレクトリ（永続データ）の読み書き。
-// GitHub Actions では内容が変わったときだけ commit & push される。
 //
-// 保持するのは3つ:
-//   edges          … 「このマップの次はこれ」という観測。循環順を導出する材料
-//   lastMap        … 直近に観測した現在マップ。循環を辿るときの出発点
-//   slotMinutes    … 直近に観測した枠の長さ（診断用）
-//   lastPostedDate … 投稿済みの日付（JST）。同じ日の二重投稿を防ぐ
+// 保持するのは観測したエッジ（「このマップの次はこれ」）だけ。
+// ローテーションが変わったときしか中身が変わらないので、Actions が作る
+// コミットも年に数回で済む。毎日変わる「投稿済みの記録」は Actions の
+// キャッシュに逃がしている（postedMarker.ts）。
 //
 // 並び（sequence）を配列として持たないのが要点。配列だと「循環が閉じたか」を
 // 判定できず、3マップ揃ったのか4マップ目が未観測なのかを区別できない。
@@ -27,15 +25,8 @@ export type RotationEdge = {
 
 export type RotationState = {
   edges: Record<string, RotationEdge>;
-  lastMap: string;
-  slotMinutes: number;
-  lastPostedDate: string;
   updatedAt: string;
 };
-
-function emptyState(): RotationState {
-  return { edges: {}, lastMap: '', slotMinutes: 0, lastPostedDate: '', updatedAt: '' };
-}
 
 // 保存済みの edges から、形の正しいものだけを拾う。
 function parseEdges(raw: unknown): Record<string, RotationEdge> {
@@ -50,7 +41,7 @@ function parseEdges(raw: unknown): Record<string, RotationEdge> {
   return edges;
 }
 
-// 保存済みの state を返す。未記録・読取不能・壊れている場合は空の state（＝初回扱い）。
+// 保存済みのエッジを返す。未記録・読取不能・壊れている場合は空（＝初回扱い）。
 // ここでクラッシュさせると投稿ごと落ちるので、必ず学習し直せる形に倒す。
 export async function readRotationState(): Promise<RotationState> {
   let parsed: Partial<RotationState> | null;
@@ -61,26 +52,22 @@ export async function readRotationState(): Promise<RotationState> {
     if (e.code !== 'ENOENT') {
       console.warn(`state ファイルを読めませんでした（${e.message}）。初回扱いにします。`);
     }
-    return emptyState();
+    return { edges: {}, updatedAt: '' };
   }
 
-  if (parsed === null || typeof parsed !== 'object') return emptyState();
+  if (parsed === null || typeof parsed !== 'object') return { edges: {}, updatedAt: '' };
   return {
     edges: parseEdges(parsed.edges),
-    lastMap: typeof parsed.lastMap === 'string' ? parsed.lastMap : '',
-    slotMinutes:
-      typeof parsed.slotMinutes === 'number' && parsed.slotMinutes > 0 ? parsed.slotMinutes : 0,
-    lastPostedDate: typeof parsed.lastPostedDate === 'string' ? parsed.lastPostedDate : '',
     updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
   };
 }
 
-export async function writeRotationState(state: Omit<RotationState, 'updatedAt'>): Promise<void> {
+export async function writeRotationState(edges: Record<string, RotationEdge>): Promise<void> {
   // キー順を固定しておくと、差分が「本当に変わった行」だけになる。
-  const edges: Record<string, RotationEdge> = {};
-  for (const map of Object.keys(state.edges).sort()) edges[map] = state.edges[map];
+  const sorted: Record<string, RotationEdge> = {};
+  for (const map of Object.keys(edges).sort()) sorted[map] = edges[map];
 
-  const saved: RotationState = { ...state, edges, updatedAt: new Date().toISOString() };
+  const saved: RotationState = { edges: sorted, updatedAt: new Date().toISOString() };
   await mkdir(dirname(ROTATION_PATH), { recursive: true });
   await writeFile(ROTATION_PATH, `${JSON.stringify(saved, null, 2)}\n`, 'utf8');
 }

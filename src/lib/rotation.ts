@@ -47,13 +47,34 @@ export type EdgeRecord = {
   reset: boolean;
 };
 
+// seenAt は無視して「つながり方」だけを比べる。同じ観測を繰り返しただけで
+// state を書き直すと、中身が同じコミットが積み上がってしまう。
+function sameEdges(a: Record<string, RotationEdge>, b: Record<string, RotationEdge>): boolean {
+  const keysA = Object.keys(a);
+  if (keysA.length !== Object.keys(b).length) return false;
+  return keysA.every((map) => b[map]?.next === a[map].next);
+}
+
+// 循環が閉じたら、その循環に乗っていないマップは前のローテーションの残骸なので捨てる。
+// 残しておくとキー数と循環の長さが食い違い、isCycleConfirmed が永久に false になる。
+function pruneToCycle(
+  edges: Record<string, RotationEdge>,
+  startMap: string,
+): Record<string, RotationEdge> {
+  const cycle = deriveCycle(edges, startMap);
+  if (!cycle.closed || cycle.maps.length === Object.keys(edges).length) return edges;
+
+  const pruned: Record<string, RotationEdge> = {};
+  for (const map of cycle.maps) pruned[map] = edges[map];
+  return pruned;
+}
+
 // 観測した「current の次は next」を1本記録する。
-// 同じ組み合わせなら何も変えない（＝state を書かずに済み、無駄なコミットが出ない）。
 //
 // 既存のエッジと食い違った場合は、そのエッジだけを直すのでは足りない。
 // 例えば A->B->C->A が A->C->B->A に変わったとき、A->C だけ上書きすると
 // 古い C->A が残って「A->C->A の2マップ循環」として誤って確定してしまう。
-// 矛盾は「もう古いモデルは信用できない」という証拠なので、全部捨てて learn し直す。
+// 矛盾は「もう古いモデルは信用できない」という証拠なので、全部捨てて学び直す。
 export function recordEdge(
   edges: Record<string, RotationEdge>,
   current: RotationSlot,
@@ -63,15 +84,32 @@ export function recordEdge(
   if (next === null) return { edges, changed: false, reset: false };
 
   const existing = edges[current.map];
+  const edge: RotationEdge = { next: next.map, seenAt: new Date(atMs).toISOString() };
+
+  let updated: Record<string, RotationEdge>;
+  let reset = false;
   if (existing !== undefined && existing.next === next.map) {
-    return { edges, changed: false, reset: false };
+    updated = edges; // 観測は既知の並びと一致
+  } else if (existing !== undefined) {
+    updated = { [current.map]: edge }; // 矛盾 → 学習し直し
+    reset = true;
+  } else {
+    updated = { ...edges, [current.map]: edge };
   }
 
-  const edge: RotationEdge = { next: next.map, seenAt: new Date(atMs).toISOString() };
-  if (existing !== undefined) {
-    return { edges: { [current.map]: edge }, changed: true, reset: true };
-  }
-  return { edges: { ...edges, [current.map]: edge }, changed: true, reset: false };
+  updated = pruneToCycle(updated, current.map);
+  return { edges: updated, changed: !sameEdges(edges, updated), reset };
+}
+
+// 循環が確定しているか。閉じているだけでは足りず、観測した全マップがその循環に
+// 乗っていることまで要る。前のローテーションの残骸が混じっていると、古い循環だけで
+// 閉じてしまい、新しく入ったマップを見落とすため。
+// pruneToCycle で残骸を落としているので、どのマップから辿っても同じ答えになる。
+export function isCycleConfirmed(edges: Record<string, RotationEdge>): boolean {
+  const keys = Object.keys(edges);
+  if (keys.length === 0) return false;
+  const cycle = deriveCycle(edges, keys[0]);
+  return cycle.closed && cycle.maps.length === keys.length;
 }
 
 export type Cycle = {

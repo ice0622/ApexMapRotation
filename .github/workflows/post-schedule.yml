@@ -3,8 +3,7 @@ name: Post Apex ranked map schedule
 on:
   # JST 0:00 にその日のローテーションを1通投稿する。
   # 01:00 / 02:00 は GitHub Actions の schedule 遅延・欠落に対するリトライ。
-  # 投稿済みかどうかは state/rotation.json の lastPostedDate で判定するので、
-  # 全部走っても投稿は1日1回に保たれる。
+  # 投稿済みかどうかはキャッシュに置いた記録で判定するので、全部走っても投稿は1日1回。
   schedule:
     - cron: '0 15,16,17 * * *'
   # 手動実行（テスト・オンデマンド投稿用）。
@@ -45,7 +44,17 @@ jobs:
           node-version: '24'
       # 実行時依存が無いため npm install は不要。
 
+      # 「その日はもう投稿したか」の記録。毎日変わる値なのでコミットせずキャッシュに置く。
+      # 失っても影響は「その日に最大3回投稿する」だけで、翌日には自然に戻る。
+      - name: Restore posted marker
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache
+          key: posted-marker-${{ github.run_id }}
+          restore-keys: posted-marker-
+
       - name: Post schedule
+        id: post
         env:
           APEX_API_KEY: ${{ secrets.APEX_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -55,6 +64,17 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run && 'true' || '' }}
         run: node src/jobs/postSchedule.ts
 
+      # 実際に投稿できた回だけ保存する。キーは重複できないので run_id で一意にし、
+      # 復元は restore-keys の前方一致で最新のものを拾う。
+      - name: Save posted marker
+        if: steps.post.outputs.posted == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache
+          key: posted-marker-${{ github.run_id }}
+
+      # state/rotation.json はローテーションを学習したときしか変わらないので、
+      # コミットはシーズンが変わったときなど年に数回だけになる。
       - name: Commit & push state if changed
         run: |
           if [ -n "$(git status --porcelain state/rotation.json)" ]; then
@@ -62,7 +82,6 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add state/rotation.json
             git commit -m "chore(state): update ranked rotation [skip ci]"
-            # 直列化しているが念のため：他実行の push を取り込んでから push。
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
             git push
           else

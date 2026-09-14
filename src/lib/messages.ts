@@ -22,8 +22,6 @@ export const JP_MAP_NAMES: Record<string, string> = {
 export const TEXT = {
   title: '今日のランクマップ',
   rangeSeparator: '-',
-  prevDayPrefix: '前日',
-  nextDayPrefix: '翌',
   untilSuffix: 'まで',
 };
 
@@ -73,26 +71,13 @@ function hhmm(atMs: number): string {
   return HHMM.format(new Date(atMs));
 }
 
-// 日をまたぐ枠は切り詰めず、"前日22:00" / "翌01:00" と実時刻のまま出す。
-function startLabel(slot: RotationSlot, dayStartMs: number): string {
-  return (slot.startMs < dayStartMs ? TEXT.prevDayPrefix : '') + hhmm(slot.startMs);
-}
-
-// ちょうど 24:00 に終わる枠は "00:00" だと逆行して見えるので、これも翌日扱いにする。
-function endLabel(slot: RotationSlot, dayEndMs: number): string {
-  return (slot.endMs >= dayEndMs ? TEXT.nextDayPrefix : '') + hhmm(slot.endMs);
-}
-
-function render(
-  slots: RotationSlot[],
-  dayStartMs: number,
-  dayEndMs: number,
-  compact: boolean,
-): string {
+function render(slots: RotationSlot[], dayStartMs: number, compact: boolean): string {
   const lines = [`${TEXT.title} ${MONTH_DAY.format(new Date(dayStartMs))}`];
   slots.forEach((slot, index) => {
-    const start = startLabel(slot, dayStartMs);
-    const end = endLabel(slot, dayEndMs);
+    // 日をまたぐ枠も時刻をそのまま出す。1日の時刻表として上から読めば
+    // 最初と最後の枠が前後の日にはみ出しているのは読み取れる。
+    const start = hhmm(slot.startMs);
+    const end = hhmm(slot.endMs);
     const name = mapLabel(slot.map);
     if (!compact) {
       lines.push(`${start}${TEXT.rangeSeparator}${end} ${name}`);
@@ -107,17 +92,13 @@ function render(
 
 // 1日のスケジュール:
 //   今日のランクマップ 9/14(月)
-//   前日22:00-02:30 ストームポイント
+//   22:00-02:30 ストームポイント
 //   02:30-07:00 ワールズエッジ
 //   ...
-//   20:30-翌01:00 Eディストリクト
-export function buildScheduleMessage(
-  slots: RotationSlot[],
-  dayStartMs: number,
-  dayEndMs: number,
-): string {
-  const full = render(slots, dayStartMs, dayEndMs, false);
+//   20:30-01:00 Eディストリクト
+export function buildScheduleMessage(slots: RotationSlot[], dayStartMs: number): string {
+  const full = render(slots, dayStartMs, false);
   if (twitterWeight(full) <= TWITTER_LIMIT) return full;
   // 枠長が短いシーズンだと時間帯レンジでは 280 を超える。終了時刻を落として収める。
-  return render(slots, dayStartMs, dayEndMs, true);
+  return render(slots, dayStartMs, true);
 }

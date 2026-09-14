@@ -4,3 +4,6 @@ node_modules/
 !.env.example
 *.log
 .DS_Store
+
+# Actions のキャッシュに逃がす一時データ（投稿済みの記録）
+.cache/

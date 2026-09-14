@@ -18,7 +18,7 @@ import { fetchRankedRotation } from '../lib/apexApi.ts';
 import type { RankedRotation } from '../lib/apexApi.ts';
 import { readRotationState, writeRotationState } from '../lib/state.ts';
 import { getMockRotation } from '../lib/mockRotation.ts';
-import { deriveCycle, jstDayStart, recordEdge } from '../lib/rotation.ts';
+import { deriveCycle, isCycleConfirmed, jstDayStart, recordEdge } from '../lib/rotation.ts';
 
 async function main(): Promise<number> {
   const apiKey = (process.env.APEX_API_KEY ?? '').trim();
@@ -28,12 +28,10 @@ async function main(): Promise<number> {
   const state = await readRotationState();
 
   // 確定済みなら API を叩かない。ここが「観測を間引く」仕組みの本体。
-  if (state.lastMap !== '' && !force) {
-    const known = deriveCycle(state.edges, state.lastMap);
-    if (known.closed) {
-      console.log(`循環は確定済み（${known.maps.join(' -> ')}）。API は叩きません。`);
-      return 0;
-    }
+  if (!force && isCycleConfirmed(state.edges)) {
+    const known = deriveCycle(state.edges, Object.keys(state.edges)[0]);
+    console.log(`循環は確定済み（${known.maps.join(' -> ')}）。API は叩きません。`);
+    return 0;
   }
 
   const nowMs = Date.now();
@@ -54,27 +52,23 @@ async function main(): Promise<number> {
   const slotMinutes = Math.round((rotation.current.endMs - rotation.current.startMs) / 60_000);
 
   console.log(
-    `観測: ${rotation.current.map} -> ${rotation.next?.map ?? '(next なし)'} / ` +
+    `観測: ${rotation.current.map} -> ${rotation.next?.map ?? '(next なし)'} / 枠長=${slotMinutes}分 / ` +
       `循環=[${cycle.maps.join(' -> ')}]${cycle.closed ? '（確定）' : '（未確定）'}`,
   );
 
   // 内容が変わったときだけ書く。毎回書くと updatedAt だけの差分で
-  // 無駄なコミットが積み上がってしまう。
-  const changed =
-    recorded.changed || state.lastMap !== rotation.current.map || state.slotMinutes !== slotMinutes;
-  if (!changed) {
-    console.log('state に変化なし。書き込みません。');
+  // 中身が同じコミットが積み上がってしまう。
+  if (!recorded.changed) {
+    console.log('エッジに変化なし。書き込みません。');
     return 0;
   }
 
-  await writeRotationState({
-    edges: recorded.edges,
-    lastMap: rotation.current.map,
-    slotMinutes,
-    // 投稿の管理は投稿ジョブの担当。ここでは触らない。
-    lastPostedDate: state.lastPostedDate,
-  });
-  console.log(cycle.closed ? '循環が確定しました。次回以降は API を叩きません。' : 'state を更新しました。');
+  await writeRotationState(recorded.edges);
+  console.log(
+    isCycleConfirmed(recorded.edges)
+      ? '循環が確定しました。次回以降は API を叩きません。'
+      : 'エッジを更新しました。まだ未確定なので観測を続けます。',
+  );
   return 0;
 }
 
