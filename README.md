@@ -1,76 +1,74 @@
 # ApexMapRotation
 
-Apex Legends の**ランクマップが変わったときだけ** Discord チャンネルに自動通知する仕組み。
+Apex Legends の**ランクマップのローテーションを1日1回まとめて** Discord チャンネルに投稿する仕組み。
 常時起動サーバーは使わず、GitHub Actions のスケジュール実行（バッチ）で完結するのでホスティングコストはゼロ。
 
 ## 仕組み
 
 ```
-GitHub Actions (5分おきの schedule)
-  → Apex Legends API (maprotation, version=2) を呼ぶ
-  → ranked.current.map（現在のランクマップ）を取得
-  → state/last_map.json の前回値と比較
-  → 変化があったときだけ Discord Webhook に通知
-  → 新しいマップ名を state に保存（変化時のみ commit & push）
+[投稿ジョブ] JST 0:00
+  → Apex Legends API を呼ぶ（平常時、APIを叩くのはここだけ）
+  → ranked.current / ranked.next を「絶対時刻付きの枠」として取得
+  → state の循環順を使って足りない枠を外挿し、当日 0:00〜24:00 を組む
+  → 時刻表として1通だけ Discord Webhook に投稿
+
+[観測ジョブ] 毎時（学習が必要なときだけ動く）
+  → 循環が確定済みなら API を叩かず即終了
+  → 未確定なら観測してエッジを1本記録する（Discord へは何も送らない）
 ```
 
-> **5分おきは「監視間隔」であって「通知間隔」ではありません。**
-> チェックは5分おきに走りますが、Discord への通知は**現在のマップが実際に変わったときだけ**です。変化がなければ何も送信しません。
+### なぜ2つに分かれているか
+
+**API が1回で返すのは `current` と `next` の隣接1組だけ**です。3マップの循環を確定するには、
+違う枠にいるタイミングで複数回観測するしかありません。投稿は1日1回で足りますが、
+学習にはそれより細かい観測が要る。この2つは要求する頻度が違うので分けています。
+
+ただしローテーションは一定周期の規則的な並びなので、**いったん循環が確定すればあとは計算で出せます**。
+観測ジョブは確定済みなら API を叩かずに終了するため、**平常時の API 呼び出しは1日1回だけ**です。
+
+シーズンでローテが変わると、その1日1回の観測が既存のエッジと矛盾します。すると学習が
+リセットされて未確定に戻り、観測ジョブがまた動き出し、半日ほどで再確定してまた静かになります。
 
 ## ディレクトリ構成
 
-機能追加（ジョブ追加）を見越して「入り口」と「共通部品」を分けています。
-
 ```
 src/
-├── jobs/            # 実行の入り口（1ジョブ = 1ファイル）
-│   └── checkMap.ts  #   マップ変更通知
-└── lib/             # ジョブ間で共有する部品
-    ├── apexApi.ts   #   Apex Legends Status API クライアント（キー秘匿込み）
-    ├── discord.ts   #   Discord Webhook 送信
-    ├── state.ts     #   state/ の読み書き
-    └── messages.ts  #   通知の文面（文言を変えるならここ）
-state/               # 前回値などの永続データ（Actions が自動 commit）
-tsconfig.json        # 型チェック用（ビルドには使わない）
-.github/workflows/   # ジョブごとのワークフロー
+├── jobs/                   # 実行の入り口（1ジョブ = 1ファイル）
+│   ├── postSchedule.ts     #   1日のスケジュール投稿
+│   └── observeRotation.ts  #   循環順の学習（通知なし）
+└── lib/                    # ジョブ間で共有する部品
+    ├── apexApi.ts          #   Apex Legends Status API クライアント（キー秘匿込み）
+    ├── rotation.ts         #   外挿・循環の導出・JSTの日境界
+    ├── mockRotation.ts     #   ダミーデータ
+    ├── discord.ts          #   Discord Webhook 送信
+    ├── state.ts            #   state/ の読み書き
+    └── messages.ts         #   通知の文面（見た目を変えるならここ）
+state/                      # 学習したエッジ・投稿済み日付（Actions が自動 commit）
+tsconfig.json               # 型チェック用（ビルドには使わない）
+.github/workflows/          # ジョブごとのワークフロー
 ```
 
 TypeScript で書かれていますが**ビルドはありません**。Node 24 が `.ts` をそのまま実行します
 （ネイティブ type stripping）。`tsc` は型チェック専用です（`npm run typecheck`）。
 
-新しいジョブを足すときは `src/jobs/` にファイルを1つ、`.github/workflows/` にワークフローを1つ追加し、共通処理は `src/lib/` を使い回します。
-
 ## 通知メッセージ
 
-**マップが変わったとき（自動）:**
-
 ```
-🗺️ ランクマップが変わりました
-以前
-E-District（Eディストリクト）
-今
-World's Edge（ワールズエッジ）
-次（21:45）
-Storm Point（ストームポイント）
+今日のランクマップ 9/14(月)
+前日22:00-02:30 ストームポイント
+02:30-07:00 ワールズエッジ
+07:00-11:30 Eディストリクト
+11:30-16:00 ストームポイント
+16:00-20:30 ワールズエッジ
+20:30-翌01:00 Eディストリクト
 ```
 
-「次（21:45）」の時刻は次にマップが切り替わる時刻（日本時間）です。ラベル（以前・今・次）は Discord 上では太字で表示されます。
-
-**手動で現在の状況を確認したとき（status モード）:**
-
-```
-🗺️ 現在のランクマップ情報
-今
-World's Edge（ワールズエッジ）
-次（21:45）
-Storm Point（ストームポイント）
-（次の切替まで 約1時間23分）
-```
-
-マップ名は「英語（日本語）」併記。日本語表記の無い新規マップは英語のみで表示します。
+- 0時をまたぐ枠は**切り詰めません**。前日から続いている枠は `前日22:00`、翌日にはみ出す枠は `翌01:00` と実時刻のまま出します。
+- 将来 X(Twitter) にそのまま流せるように、**マークダウンを使わず**マップ名は**日本語のみ**にしています。英名併記にすると X の 280 カウントを超えるためです。
+- 280 を超える場合（枠が3時間以下に短くなったシーズンなど）は、終了時刻を省いた短縮形へ自動で切り替わります。
 
 通知の文面はすべて [src/lib/messages.ts](src/lib/messages.ts) に集約しています。
-文言やラベルを変えたいときは `TEXT` 定数を、日本語マップ名を追加したいときは `JP_MAP_NAMES` を編集してください。
+見出しや区切り記号を変えたいときは `TEXT` 定数を、日本語マップ名を追加したいときは `JP_MAP_NAMES` を編集してください。
 
 ## セットアップ
 
@@ -89,20 +87,39 @@ Storm Point（ストームポイント）
    `APEX_API_KEY` を登録するまでは自動でモックモードになります。
 
 3. **Actions を有効化**
-   Actions タブでワークフローを有効化すれば、5分おきのスケジュールが動き始めます。
+   Actions タブでワークフローを有効化すれば、毎日 JST 0:00 の投稿が動き始めます。
+
+## 実行スケジュール
+
+| ワークフロー | cron（UTC） | 実際にすること |
+|---|---|---|
+| [post-schedule.yml](.github/workflows/post-schedule.yml) | `0 15,16,17 * * *` | JST 0:00 に投稿。1:00 / 2:00 は遅延・欠落に対するリトライ |
+| [observe-rotation.yml](.github/workflows/observe-rotation.yml) | `0 * * * *` | 毎時。循環が確定していれば API を叩かず即終了 |
+
+**GitHub の schedule は宣言どおりには実行されません。** このリポジトリの実測では
+`*/5 * * * *`（本来1日288回）が **約3時間に1回まで間引かれていました**（8日間で60回＝3%）。
+そのため設計は「時刻はあてにせず、抜けても次で取り返す」前提になっています。
+
+- 投稿の重複は `state/rotation.json` の `lastPostedDate` で防ぐので、リトライが全部走っても投稿は1日1回。
+- 観測は間引かれて2〜3時間おきになっても、枠長（4.5時間）より短ければ全ての枠を `current` として捉えられます。
+- 2つのワークフローは同じ state を書くため、同一の `concurrency` グループ（`rotation-state`）で直列化しています。
 
 ## 手動実行
 
-Actions タブ → **Check Apex ranked map** → **Run workflow** から手動実行できます。
+Actions タブから **Run workflow** で実行できます。
 
-- `action: check` — その場でチェックし、変化していれば通知（通常と同じ挙動）。
-- `action: status` — 現在のマップ・次のマップ・残り時間を**今すぐ**通知（変化に関係なく送信、state は更新しない）。
-- `use_mock: true` — APIキー無しでもダミーデータで Discord 送信を確認できる。
+**Post Apex ranked map schedule**
+- `force: true` — 本日投稿済みでも再投稿する
+- `use_mock: true` — APIキー無しでもダミーデータで Discord 送信を確認できる
+- `dry_run: true` — 送信せず、文面と文字数をログにだけ出す
 
-コマンドラインからは [GitHub CLI](https://cli.github.com/) でも実行できます：
+**Observe Apex ranked rotation**
+- `force: true` — 確定済みでも観測する
+- `use_mock: true` — ダミーデータで動作確認
 
 ```bash
-gh workflow run check-map.yml -f action=status
+gh workflow run post-schedule.yml -f dry_run=true
+gh workflow run observe-rotation.yml -f force=true
 ```
 
 ## ローカル開発
@@ -111,28 +128,30 @@ gh workflow run check-map.yml -f action=status
 
 ```bash
 cp .env.example .env
-# .env の DISCORD_WEBHOOK_URL に本物の Webhook を入れると実際に通知が届く
+# .env の DISCORD_WEBHOOK_URL に本物の Webhook を入れると実際に投稿が届く
 
-npm run check         # 通常のチェック（変化時のみ通知）
-npm run check:mock    # ダミーデータで変更通知をテスト
-npm run status        # 現在の状況＋残り時間を通知
-npm run status:mock   # ダミーデータでステータス通知をテスト
+npm run post:dry      # 送信せず文面と文字数だけ出す（フォーマット調整用）
+npm run post:mock     # ダミーデータで実際に Discord へ送る
+npm run post          # 通常実行
+npm run observe       # 観測（確定済みなら何もしない）
+npm run observe:mock  # ダミーデータで観測
 
 npm ci                # 型チェックを使う場合のみ（typescript を入れる）
 npm run typecheck     # 型チェック（CI でも push 時に自動実行）
 ```
 
-`npm run check:mock` を2回実行すると、1回目は state をシード（通知なし）、2回目でマップが変わったとみなして通知が届きます。
+`npm run post:dry` は state を書き換えないので、フォーマットの試行錯誤はこれで回してください。
+枠が短いときの短縮形を試すには `MOCK_SLOT_MINUTES=180 npm run post:dry` のように指定します。
 
-> ローカル実行は作業ツリーの `state/last_map.json` を書き換えますが、**コミットはしません**（コミットは GitHub Actions の役割）。
-> テストで汚れたら `git checkout -- state/last_map.json` で戻してください。
+> ローカル実行は作業ツリーの `state/rotation.json` を書き換えますが、**コミットはしません**（コミットは GitHub Actions の役割）。
+> テストで汚れたら `git checkout -- state/rotation.json` で戻してください。
+> 同じ日に2回投稿を試すときは `FORCE=true` を付けないと「投稿済み」で止まります。
 
 ## モックモード
 
 `APEX_API_KEY` が未設定、または `USE_MOCK=true` のときは実APIを呼ばずダミーデータを使います。
-
-- **自動モック**（キー未設定）: 固定マップを返すのでスケジュール実行は静かなまま。
-- **明示モック**（`USE_MOCK=true`）: 前回の「次のマップ」を返すので必ず変化が起き、通知の疎通を確認できます。
+前日22時を起点に4.5時間の枠を並べ、実行時刻を含む枠を `current` とするので、本番と同じ形の
+スケジュールが1日分出ます。`MOCK_SLOT_MINUTES` で枠の長さを変えられます。
 
 ## 依存関係とサプライチェーン対策
 
@@ -143,13 +162,34 @@ npm run typecheck     # 型チェック（CI でも push 時に自動実行）
 
 ## 状態管理
 
-前回の現在マップ名は [state/last_map.json](state/last_map.json) に保存します。変化があったときだけ
-`github-actions[bot]` 名義で自動 commit & push されます。
+[state/rotation.json](state/rotation.json) に保存します。`github-actions[bot]` 名義で自動 commit & push されます。
+
+| キー | 用途 |
+|---|---|
+| `edges` | 「このマップの次はこれ」という観測。循環順を導出する材料 |
+| `lastMap` | 直近に観測した現在マップ。循環を辿るときの出発点 |
+| `slotMinutes` | 直近に観測した枠の長さ（診断用） |
+| `lastPostedDate` | 投稿済みの日付（JST）。二重投稿の防止 |
+
+**並びを配列で持たず、エッジ（有向辺）の集合で持っている**のが設計の要点です。
+配列だと `[A, B, C]` まで並んでも本当は `[A, B, D, C]` かもしれず、**循環が閉じたかを判定できません**。
+エッジなら出発点に戻れたかで確定を判定でき、確定するまで API を叩き続けるという制御ができます。
+
+並びは毎回 `lastMap` からエッジを辿って導出します。常に「今のマップ」を起点にするので、
+シーズン変更で使われなくなったマップは経路から外れて自動的に無視されます。
+
+観測が既存のエッジと食い違った場合は、そのエッジだけを直すのでは足りません。
+`A→B→C→A` が `A→C→B→A` に変わったとき `A→C` だけ上書きすると、古い `C→A` が残って
+「`A→C→A` の2マップ循環」として誤って確定してしまいます。矛盾は「古いモデルはもう信用できない」
+という証拠なので、**全エッジを破棄して学習し直します**。
+
+初期値には git 履歴で実測した `Storm Point → World's Edge → E-District` を入れてあります。
 
 ## 注意点
 
-- Apex Legends API は非公式サービスで公式のSLAはありません。取得に失敗したときは通知せずスキップします（誤検知防止）。
-- GitHub Actions のスケジュールはベストエフォートで、数分〜十数分の遅延や稀に欠落があります。ランクマップの変化は数時間単位なので実用上は問題ありません。
+- Apex Legends API は非公式サービスで公式のSLAはありません。取得に失敗したときは投稿せずスキップし、同じ日の次のリトライ枠で再試行します。
+- Discord への送信に失敗した場合は `lastPostedDate` を進めないので、次のリトライ枠で再送されます（学習結果は投稿の成否と切り離して保存されるため、観測はやり直しになりません）。
+- **実測できるのは `current` と `next` の2枠だけで、それ以降は外挿です。** ローテーションの長さや並びが予告なく変わると当日分がずれることがあります。ずれは Actions のログに警告として出て、翌日以降は自動で補正されます（Discord の文面には出しません）。
 - リポジトリに **60日間** 活動が無いとスケジュールは自動停止します（GitHub仕様）。手動実行や任意のコミットで復帰します。
 
 ## クレジット

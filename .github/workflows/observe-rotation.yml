@@ -1,0 +1,67 @@
+name: Observe Apex ranked rotation
+
+on:
+  # マップの循環順を学習するためだけのジョブ。Discord へは何も送らない。
+  #
+  # 循環が確定していれば API を叩かずに即終了するので、平常時の API 呼び出しは
+  # 投稿ジョブの1日1回だけになる。未確定のとき（初回・シーズン変更直後）だけ
+  # 毎回観測し、枠長（4.5時間）より短い間隔で回るので半日ほどで再確定する。
+  #
+  # GitHub は schedule を宣言どおりには実行しない（このリポジトリの実測では
+  # */5 が約3時間に1回まで間引かれていた）。毎時で宣言しておけば、間引かれても
+  # 枠長より短い間隔は確保できる。
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '確定済みでも観測する'
+        type: boolean
+        default: false
+      use_mock:
+        description: 'ダミーデータを使う'
+        type: boolean
+        default: false
+
+# state/rotation.json を push するために必要。
+permissions:
+  contents: write
+
+# post-schedule.yml と同じ state を書くので、同一グループで直列化する。
+concurrency:
+  group: rotation-state
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # 実行時依存が無いため npm install は不要。
+
+      - name: Observe rotation
+        env:
+          APEX_API_KEY: ${{ secrets.APEX_API_KEY }}
+          # schedule では inputs が null になるため既定値へフォールバック。
+          USE_MOCK: ${{ inputs.use_mock && 'true' || '' }}
+          FORCE: ${{ inputs.force && 'true' || '' }}
+        run: node src/jobs/observeRotation.ts
+
+      - name: Commit & push state if changed
+        run: |
+          if [ -n "$(git status --porcelain state/rotation.json)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state/rotation.json
+            git commit -m "chore(state): learn ranked rotation [skip ci]"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            git push
+          else
+            echo "state に変更なし。コミットしません。"
+          fi

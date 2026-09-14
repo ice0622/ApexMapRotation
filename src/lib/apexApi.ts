@@ -8,18 +8,36 @@ const HTTP_TIMEOUT_MS = 10_000;
 // User-Agent が無いと Cloudflare 側で 406 を返すため明示する。
 const USER_AGENT = 'ApexMapRotation (+https://github.com/ice0622/ApexMapRotation)';
 
-// ランクマップのローテーション情報。
-export type RankedMap = {
+// ローテーションの1枠。start/end は UNIX ミリ秒の絶対時刻。
+// 1日分のスケジュールを組むには「残り時間」のような相対値では足りないので、
+// このモジュールで絶対時刻へ正規化してから外へ渡す。
+export type RotationSlot = {
   map: string;
-  nextMap: string | null;
-  remainingMins: number | null;
+  startMs: number;
+  endMs: number;
 };
 
-// /maprotation レスポンスの想定形。実際の値は実行時に検証する。
+// API が返すのは「今の枠」と「次の枠」の2つだけ。
+// 1日分（4.5時間枠なら6〜7枠）はこの2枠を起点に rotation.ts で外挿する。
+export type RankedRotation = {
+  current: RotationSlot;
+  next: RotationSlot | null;
+};
+
+// /maprotation レスポンスの想定形。実際の値は実行時に検証するため全て unknown で受ける。
+type SlotResponse = {
+  start?: unknown; // UNIX 秒
+  end?: unknown; // UNIX 秒
+  map?: unknown;
+  DurationInMinutes?: unknown;
+  remainingMins?: unknown;
+  remainingTimer?: unknown;
+};
+
 type MapRotationResponse = {
   ranked?: {
-    current?: { map?: unknown; remainingMins?: unknown; remainingTimer?: unknown };
-    next?: { map?: unknown };
+    current?: SlotResponse;
+    next?: SlotResponse;
   };
 };
 
@@ -68,21 +86,55 @@ function timerStringToMinutes(timer: unknown): number | null {
   return Math.floor(seconds / 60);
 }
 
-// ランクマップのローテーション情報 { map, nextMap, remainingMins } を返す。
-export async function fetchRankedMap(apiKey: string): Promise<RankedMap> {
+// 正の有限数だけを通す。API は欠損を 0 や null で返すことがあるため 0 も弾く。
+function positiveNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+// 枠1つ分を絶対時刻へ正規化する。
+// start / end / DurationInMinutes は欠けることがあるので、揃っている情報から
+// 残りを逆算する。それでも決まらなければ null を返し、呼び出し側に判断を委ねる。
+function parseSlot(
+  raw: SlotResponse | undefined,
+  fallback: { startMs?: number | null; endMs?: number | null },
+): RotationSlot | null {
+  if (!raw) return null;
+  const map = typeof raw.map === 'string' && raw.map.length > 0 ? raw.map : null;
+  if (map === null) return null;
+
+  const durationMins = positiveNumber(raw.DurationInMinutes);
+  const durationMs = durationMins === null ? null : durationMins * 60_000;
+  const startSec = positiveNumber(raw.start);
+  const endSec = positiveNumber(raw.end);
+
+  let startMs = startSec === null ? (fallback.startMs ?? null) : startSec * 1000;
+  let endMs = endSec === null ? (fallback.endMs ?? null) : endSec * 1000;
+
+  if (startMs === null && endMs !== null && durationMs !== null) startMs = endMs - durationMs;
+  if (endMs === null && startMs !== null && durationMs !== null) endMs = startMs + durationMs;
+  if (startMs === null || endMs === null || endMs <= startMs) return null;
+
+  return { map, startMs, endMs };
+}
+
+// ランクマップの「今の枠」と「次の枠」を絶対時刻付きで返す。
+export async function fetchRankedRotation(apiKey: string): Promise<RankedRotation> {
   const data = (await apiGet('/maprotation', { version: '2' }, apiKey)) as MapRotationResponse;
-
   const ranked = data?.ranked ?? {};
-  const map = ranked.current?.map;
-  if (typeof map !== 'string' || map.length === 0) {
-    throw new Error('map API response missing ranked.current.map');
-  }
-  const rawNext = ranked.next?.map;
-  const nextMap = typeof rawNext === 'string' && rawNext.length > 0 ? rawNext : null;
-  const rawMins = ranked.current?.remainingMins;
-  const remainingMins = typeof rawMins === 'number'
-    ? rawMins
-    : timerStringToMinutes(ranked.current?.remainingTimer);
 
-  return { map, nextMap, remainingMins };
+  // current は end が欠けていても「今 + 残り時間」で復元できる。
+  const remainingMins =
+    positiveNumber(ranked.current?.remainingMins) ??
+    timerStringToMinutes(ranked.current?.remainingTimer);
+  const current = parseSlot(ranked.current, {
+    endMs: remainingMins === null ? null : Date.now() + remainingMins * 60_000,
+  });
+  if (current === null) {
+    throw new Error('map API response missing usable ranked.current (map / start / end)');
+  }
+
+  // next は start が欠けていても current の終わりに連結しているとみなせる。
+  const next = parseSlot(ranked.next, { startMs: current.endMs });
+
+  return { current, next };
 }

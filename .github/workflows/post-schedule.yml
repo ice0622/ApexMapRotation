@@ -1,35 +1,39 @@
-name: Check Apex ranked map
+name: Post Apex ranked map schedule
 
 on:
-  # 監視のみ。5分おきにチェックし、マップが変わったときだけ通知する。
+  # JST 0:00 にその日のローテーションを1通投稿する。
+  # 01:00 / 02:00 は GitHub Actions の schedule 遅延・欠落に対するリトライ。
+  # 投稿済みかどうかは state/rotation.json の lastPostedDate で判定するので、
+  # 全部走っても投稿は1日1回に保たれる。
   schedule:
-    - cron: '*/5 * * * *'
-  # 手動実行（テスト・オンデマンドのステータス表示用）。
+    - cron: '0 15,16,17 * * *'
+  # 手動実行（テスト・オンデマンド投稿用）。
   workflow_dispatch:
     inputs:
-      action:
-        description: 'check = 変化時のみ通知 / status = 現在の状況＋残り時間を今すぐ通知'
-        type: choice
-        options:
-          - check
-          - status
-        default: check
+      force:
+        description: '本日投稿済みでも再投稿する'
+        type: boolean
+        default: false
       use_mock:
         description: 'ダミーデータを使う（APIキー無しで Discord 送信を確認）'
         type: boolean
         default: false
+      dry_run:
+        description: '送信せずログに文面だけ出す'
+        type: boolean
+        default: false
 
-# state/last_map.json を push するために必要。
+# state/rotation.json を push するために必要。
 permissions:
   contents: write
 
-# 実行を直列化し、重複実行による git push の競合を防ぐ。
+# observe-rotation.yml と同じ state を書くので、同一グループで直列化する。
 concurrency:
-  group: check-map
+  group: rotation-state
   cancel-in-progress: false
 
 jobs:
-  check:
+  post:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -41,22 +45,23 @@ jobs:
           node-version: '24'
       # 実行時依存が無いため npm install は不要。
 
-      - name: Run map check
+      - name: Post schedule
         env:
           APEX_API_KEY: ${{ secrets.APEX_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           # schedule では inputs が null になるため既定値へフォールバック。
-          MODE: ${{ inputs.action || 'check' }}
           USE_MOCK: ${{ inputs.use_mock && 'true' || '' }}
-        run: node src/jobs/checkMap.ts
+          FORCE: ${{ inputs.force && 'true' || '' }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || '' }}
+        run: node src/jobs/postSchedule.ts
 
       - name: Commit & push state if changed
         run: |
-          if [ -n "$(git status --porcelain state/last_map.json)" ]; then
+          if [ -n "$(git status --porcelain state/rotation.json)" ]; then
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add state/last_map.json
-            git commit -m "chore(state): update ranked map [skip ci]"
+            git add state/rotation.json
+            git commit -m "chore(state): update ranked rotation [skip ci]"
             # 直列化しているが念のため：他実行の push を取り込んでから push。
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
             git push
