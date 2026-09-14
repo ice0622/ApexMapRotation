@@ -23,6 +23,8 @@ export const TEXT = {
   title: '今日のランクマップ',
   rangeSeparator: '-',
   untilSuffix: 'まで',
+  // 並びが判別できず、確定した枠だけを出すときに最後へ足す1行。
+  partialNote: '※新しいマップを確認中のため、ここまで',
 };
 
 // 表示時刻のタイムゾーン。
@@ -71,7 +73,12 @@ function hhmm(atMs: number): string {
   return HHMM.format(new Date(atMs));
 }
 
-function render(slots: RotationSlot[], dayStartMs: number, compact: boolean): string {
+function render(
+  slots: RotationSlot[],
+  dayStartMs: number,
+  compact: boolean,
+  partial: boolean,
+): string {
   const lines = [`${TEXT.title} ${MONTH_DAY.format(new Date(dayStartMs))}`];
   slots.forEach((slot, index) => {
     // 日をまたぐ枠も時刻をそのまま出す。1日の時刻表として上から読めば
@@ -87,6 +94,7 @@ function render(slots: RotationSlot[], dayStartMs: number, compact: boolean): st
     const tail = index === slots.length - 1 ? `（${end}${TEXT.untilSuffix}）` : '';
     lines.push(`${start} ${name}${tail}`);
   });
+  if (partial) lines.push(TEXT.partialNote);
   return lines.join('\n');
 }
 
@@ -96,9 +104,14 @@ function render(slots: RotationSlot[], dayStartMs: number, compact: boolean): st
 //   02:30-07:00 ワールズエッジ
 //   ...
 //   20:30-01:00 Eディストリクト
-export function buildScheduleMessage(slots: RotationSlot[], dayStartMs: number): string {
-  const full = render(slots, dayStartMs, false);
+// partial=true は「並びが分からず確定分だけ」の状態。注記を1行足す。
+export function buildScheduleMessage(
+  slots: RotationSlot[],
+  dayStartMs: number,
+  partial: boolean,
+): string {
+  const full = render(slots, dayStartMs, false, partial);
   if (twitterWeight(full) <= TWITTER_LIMIT) return full;
   // 枠長が短いシーズンだと時間帯レンジでは 280 を超える。終了時刻を落として収める。
-  return render(slots, dayStartMs, true);
+  return render(slots, dayStartMs, true, partial);
 }
