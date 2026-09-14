@@ -1,20 +1,12 @@
 {
   "edges": {
-    "E-District": {
-      "next": "Storm Point",
-      "seenAt": "2026-07-16T22:15:13.064Z"
-    },
-    "Storm Point": {
-      "next": "World's Edge",
-      "seenAt": "2026-07-16T14:15:25.330Z"
-    },
     "World's Edge": {
-      "next": "E-District",
-      "seenAt": "2026-07-16T17:58:51.808Z"
+      "next": "Storm Point",
+      "seenAt": "2026-09-14T03:01:38.826Z"
     }
   },
-  "lastMap": "E-District",
-  "slotMinutes": 0,
-  "lastPostedDate": "",
-  "updatedAt": "2026-09-14T00:00:00.000Z"
+  "lastMap": "World's Edge",
+  "slotMinutes": 270,
+  "lastPostedDate": "2026-09-14",
+  "updatedAt": "2026-09-14T03:01:40.475Z"
 }
