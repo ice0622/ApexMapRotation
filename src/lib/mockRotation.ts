@@ -3,10 +3,12 @@
 //
 // 前日22時を起点に枠を並べ、実行時刻を含む枠を current とする。
 // 0時に実行すれば「前日22:00 開始の枠」が current になり、本番と同じ形になる。
+// 並びは本番と同じ RANKED_ROTATION を使う。別に持つと、モックで動かしたときだけ
+// verifyRotation が警告を出してしまい、本当のずれと見分けがつかなくなる。
 
 import type { RankedRotation, RotationSlot } from './apexApi.ts';
+import { RANKED_ROTATION } from './rotation.ts';
 
-const MOCK_ROTATION = ['Storm Point', "World's Edge", 'E-District'];
 // 既定の枠長。MOCK_SLOT_MINUTES で上書きでき、枠が短いときの短縮形も試せる。
 const MOCK_SLOT_MINUTES = 270;
 
@@ -23,7 +25,7 @@ export function getMockRotation(dayStartMs: number): RankedRotation {
   }
 
   const slotAt = (i: number, at: number): RotationSlot => ({
-    map: MOCK_ROTATION[i % MOCK_ROTATION.length],
+    map: RANKED_ROTATION[i % RANKED_ROTATION.length],
     startMs: at,
     endMs: at + slotMs,
   });

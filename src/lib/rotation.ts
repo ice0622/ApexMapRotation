@@ -1,17 +1,28 @@
 // 1日分のローテーションを組み立てるモジュール。
 //
-// API は「今の枠」と「次の枠」しか返さない（1回の呼び出し＝隣接1組）。
-// 1日分を出すには残りを外挿する必要があり、その材料が2つある:
+// API が返すのは「今の枠」と「次の枠」の2つだけなので、1日分（4.5時間枠なら6〜7枠）は
+// ここで外挿する。材料は2つ:
 //   枠長   … API の current / next の実測（最優先。推測値は使わない）
-//   循環順 … 観測したエッジ（A の次は B）を辿って導出した並び
+//   循環順 … 下の RANKED_ROTATION（手で書く定数）
 //
-// 循環順を「配列」ではなく「エッジの集合」で持つのが設計の要点。
-// 配列だと [A,B,C] まで並んでも、本当は [A,B,D,C] かもしれず、
-// 「循環が閉じたか」を判定できない。エッジなら出発点に戻れたかで確定を判定でき、
-// シーズンでローテが変わってもエッジを上書きするだけで古い並びが自然に脱落する。
+// 循環順を自動で学習させる作りも試したが、割に合わなかった。API は隣接1組しか
+// 返さないため、循環を確定するには一巡（約13.5時間）観測し続けるしかなく、
+// その間は誤った表を出してしまう。ローテーションが変わるのはシーズンごと＝年に数回で、
+// 手で3行書き換えれば済む。代わりに verifyRotation で「定数が古い」ことだけ自動検知する。
 
 import type { RankedRotation, RotationSlot } from './apexApi.ts';
-import type { RotationEdge } from './state.ts';
+
+// ---------------------------------------------------------------------------
+// ランクのマップローテーション（シーズンで変わったら手で書き換える）
+// ---------------------------------------------------------------------------
+//
+// この順に一定の長さずつ回る。末尾の次は先頭に戻る。
+// 名前は API が返す英語表記と完全に一致させること（日本語表示は messages.ts の
+// JP_MAP_NAMES が担当する）。
+//
+// 並びが実際と食い違うと verifyRotation が警告を出し、ジョブが失敗扱いになって
+// GitHub から通知が届く。そうなったらこの配列を直す。
+export const RANKED_ROTATION = ["World's Edge", 'Storm Point', 'E-District'];
 
 // Asia/Tokyo はサマータイムが無いので固定オフセットで正確に計算できる。
 // Intl で日付を分解して組み直すより単純で、丸め誤差も入らない。
@@ -21,8 +32,6 @@ export const DAY_MS = 24 * 60 * 60 * 1000;
 
 // 枠長が壊れた値（極端に短い等）でも無限ループしないための上限。
 const MAX_SLOTS_PER_DAY = 48;
-// エッジが矛盾していても辿り続けないための上限。
-const MAX_CYCLE_LENGTH = 16;
 
 // 指定時刻を含む JST の日の 00:00 を UNIX ミリ秒で返す。
 export function jstDayStart(atMs: number): number {
@@ -40,106 +49,28 @@ function cycleAt(cycle: string[], index: number): string {
   return cycle[((index % n) + n) % n];
 }
 
-export type EdgeRecord = {
-  edges: Record<string, RotationEdge>;
-  changed: boolean;
-  // 既存のエッジと矛盾したため、他のエッジを捨てて学習し直したか。
-  reset: boolean;
-};
+// API が返した「今 -> 次」が定数の並びと合っているか確かめる。
+// 合わなければシーズンでローテーションが変わっている。直すのは手作業だが、
+// 直すべきだということは毎日の実行が自動で教えてくれる。
+export function verifyRotation(rotation: RankedRotation, cycle: string[]): string[] {
+  const { current, next } = rotation;
 
-// seenAt は無視して「つながり方」だけを比べる。同じ観測を繰り返しただけで
-// state を書き直すと、中身が同じコミットが積み上がってしまう。
-function sameEdges(a: Record<string, RotationEdge>, b: Record<string, RotationEdge>): boolean {
-  const keysA = Object.keys(a);
-  if (keysA.length !== Object.keys(b).length) return false;
-  return keysA.every((map) => b[map]?.next === a[map].next);
-}
-
-// 循環が閉じたら、その循環に乗っていないマップは前のローテーションの残骸なので捨てる。
-// 残しておくとキー数と循環の長さが食い違い、isCycleConfirmed が永久に false になる。
-function pruneToCycle(
-  edges: Record<string, RotationEdge>,
-  startMap: string,
-): Record<string, RotationEdge> {
-  const cycle = deriveCycle(edges, startMap);
-  if (!cycle.closed || cycle.maps.length === Object.keys(edges).length) return edges;
-
-  const pruned: Record<string, RotationEdge> = {};
-  for (const map of cycle.maps) pruned[map] = edges[map];
-  return pruned;
-}
-
-// 観測した「current の次は next」を1本記録する。
-//
-// 既存のエッジと食い違った場合は、そのエッジだけを直すのでは足りない。
-// 例えば A->B->C->A が A->C->B->A に変わったとき、A->C だけ上書きすると
-// 古い C->A が残って「A->C->A の2マップ循環」として誤って確定してしまう。
-// 矛盾は「もう古いモデルは信用できない」という証拠なので、全部捨てて学び直す。
-export function recordEdge(
-  edges: Record<string, RotationEdge>,
-  current: RotationSlot,
-  next: RotationSlot | null,
-  atMs: number,
-): EdgeRecord {
-  if (next === null) return { edges, changed: false, reset: false };
-
-  const existing = edges[current.map];
-  const edge: RotationEdge = { next: next.map, seenAt: new Date(atMs).toISOString() };
-
-  let updated: Record<string, RotationEdge>;
-  let reset = false;
-  if (existing !== undefined && existing.next === next.map) {
-    updated = edges; // 観測は既知の並びと一致
-  } else if (existing !== undefined) {
-    updated = { [current.map]: edge }; // 矛盾 → 学習し直し
-    reset = true;
-  } else {
-    updated = { ...edges, [current.map]: edge };
+  const index = cycle.indexOf(current.map);
+  if (index < 0) {
+    return [
+      `現在のマップ "${current.map}" が RANKED_ROTATION [${cycle.join(', ')}] に含まれていません。` +
+        `src/lib/rotation.ts の RANKED_ROTATION を更新してください。`,
+    ];
   }
+  if (next === null) return [];
 
-  updated = pruneToCycle(updated, current.map);
-  return { edges: updated, changed: !sameEdges(edges, updated), reset };
-}
-
-// 循環が確定しているか。閉じているだけでは足りず、観測した全マップがその循環に
-// 乗っていることまで要る。前のローテーションの残骸が混じっていると、古い循環だけで
-// 閉じてしまい、新しく入ったマップを見落とすため。
-// pruneToCycle で残骸を落としているので、どのマップから辿っても同じ答えになる。
-export function isCycleConfirmed(edges: Record<string, RotationEdge>): boolean {
-  const keys = Object.keys(edges);
-  if (keys.length === 0) return false;
-  const cycle = deriveCycle(edges, keys[0]);
-  return cycle.closed && cycle.maps.length === keys.length;
-}
-
-export type Cycle = {
-  // startMap を先頭にした並び。
-  maps: string[];
-  // 出発点まで戻れたか。false なら循環がまだ確定していない。
-  closed: boolean;
-};
-
-// startMap からエッジを辿って循環順を導出する。
-// 出発点に戻れれば確定。未知のエッジに当たる、または途中で別の場所へ合流する
-// （＝エッジが矛盾している）場合は未確定として、判明している分だけを返す。
-//
-// 常に「今のマップ」から辿るので、シーズン変更で使われなくなったマップは
-// 経路から外れて自動的に無視される。明示的な削除処理は要らない。
-export function deriveCycle(edges: Record<string, RotationEdge>, startMap: string): Cycle {
-  const maps = [startMap];
-  const visited = new Set([startMap]);
-  let node = startMap;
-
-  while (maps.length <= MAX_CYCLE_LENGTH) {
-    const edge = edges[node];
-    if (edge === undefined) return { maps, closed: false }; // 未観測のエッジ
-    if (edge.next === startMap) return { maps, closed: true }; // 一周した
-    if (visited.has(edge.next)) return { maps, closed: false }; // 途中で合流＝矛盾
-    maps.push(edge.next);
-    visited.add(edge.next);
-    node = edge.next;
-  }
-  return { maps, closed: false };
+  const expected = cycleAt(cycle, index + 1);
+  if (next.map === expected) return [];
+  return [
+    `ローテーションが変わっています。API は "${current.map}" -> "${next.map}" を返しましたが、` +
+      `RANKED_ROTATION では "${current.map}" -> "${expected}" です。` +
+      `src/lib/rotation.ts の RANKED_ROTATION を更新してください。`,
+  ];
 }
 
 export type DaySchedule = {
@@ -152,7 +83,7 @@ export type DaySchedule = {
 // 0時をまたぐ枠は切り詰めず、実際の開始・終了時刻を保ったまま含める。
 export function buildDaySchedule(opts: {
   rotation: RankedRotation;
-  cycle: Cycle;
+  cycle: string[];
   dayStartMs: number;
 }): DaySchedule {
   const { rotation, cycle, dayStartMs } = opts;
@@ -172,25 +103,17 @@ export function buildDaySchedule(opts: {
     }
   }
 
-  if (!cycle.closed) {
-    warnings.push(
-      `循環がまだ確定していません（判明している並び: ${cycle.maps.join(' -> ')}）。観測が一周するまで外挿がずれることがあります。`,
-    );
-  }
-
   // 外挿は current を基準に前後へ伸ばすので、循環は current.map が先頭でなければならない。
-  // deriveCycle をどこから辿って作った Cycle を渡されても正しく動くよう、ここで回し直す。
-  // （この整列を呼び出し側の責任にすると、ずれた Cycle を渡されたときに
-  //   エラーにならず「1日ぶんの並びが静かにずれた表」が出てしまう）
-  const pivot = cycle.maps.indexOf(current.map);
+  // 定数がどの順で書かれていても正しく動くよう、ここで回し直す。
+  // （整列を呼び出し側の責任にすると、ずれた並びを渡されたときにエラーにならず
+  //   「1日ぶんの並びが静かにずれた表」が出てしまう）
+  const pivot = cycle.indexOf(current.map);
   let cycleMaps: string[];
   if (pivot < 0) {
+    // verifyRotation が既に警告済み。ここでは観測できた2枠だけで外挿する。
     cycleMaps = next === null ? [current.map] : [current.map, next.map];
-    warnings.push(
-      `現在のマップ ${current.map} が循環 [${cycle.maps.join(', ')}] に含まれていません。観測した2枠だけで外挿します。`,
-    );
   } else {
-    cycleMaps = [...cycle.maps.slice(pivot), ...cycle.maps.slice(0, pivot)];
+    cycleMaps = [...cycle.slice(pivot), ...cycle.slice(0, pivot)];
   }
 
   const slots: RotationSlot[] = [];

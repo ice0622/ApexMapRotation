@@ -2,11 +2,12 @@
 //
 // 1日1回（JST 0:00）、その日のローテーションを時刻表として1通にまとめて送る。
 // API は「今の枠」と「次の枠」しか返さないため、残りの枠は rotation.ts で外挿する。
-// 外挿に使う循環順は state/rotation.json のエッジから導出する（学習は observeRotation.ts の担当）。
+// 外挿に使うマップの並びは rotation.ts の RANKED_ROTATION（手で書く定数）。
 //
 // GitHub Actions の schedule は宣言どおりに走らない（実測で高頻度 cron は3%程度まで
 // 間引かれる）。そのため cron は1日3本あり、二重投稿は投稿済みの記録で防ぐ。
 // その記録はコミットせず Actions のキャッシュに置く（postedMarker.ts）。
+// リポジトリに書き込むものは何も無いので、bot によるコミットは発生しない。
 //
 // TypeScript のまま Node 24 で直接実行する（ネイティブ type stripping、ビルド不要）。
 // 実行時の依存パッケージはゼロ（ネイティブ fetch / AbortSignal.timeout を利用）。
@@ -17,10 +18,15 @@ import { appendFile } from 'node:fs/promises';
 import { fetchRankedRotation } from '../lib/apexApi.ts';
 import type { RankedRotation } from '../lib/apexApi.ts';
 import { sendDiscordNotification } from '../lib/discord.ts';
-import { readRotationState, writeRotationState } from '../lib/state.ts';
 import { readLastPostedDate, writeLastPostedDate } from '../lib/postedMarker.ts';
 import { getMockRotation } from '../lib/mockRotation.ts';
-import { buildDaySchedule, deriveCycle, jstDateKey, jstDayStart, recordEdge } from '../lib/rotation.ts';
+import {
+  buildDaySchedule,
+  jstDateKey,
+  jstDayStart,
+  verifyRotation,
+  RANKED_ROTATION,
+} from '../lib/rotation.ts';
 import { buildScheduleMessage, twitterWeight, TWITTER_LIMIT } from '../lib/messages.ts';
 
 type Config = {
@@ -49,6 +55,17 @@ async function signalPosted(): Promise<void> {
   if (out) await appendFile(out, 'posted=true\n');
 }
 
+// 定数が実際のローテーションとずれていたら、投稿が成功していても失敗扱いで終える。
+// ログに書くだけでは誰も見ないが、ジョブが赤くなれば GitHub から通知が届く。
+function exitCodeFor(rotationWarnings: string[]): number {
+  if (rotationWarnings.length === 0) return 0;
+  console.error(
+    'RANKED_ROTATION が実際のローテーションと一致していません。' +
+      '投稿そのものは完了していますが、定数を直すまで失敗扱いにします。',
+  );
+  return 1;
+}
+
 async function main(): Promise<number> {
   const cfg = loadConfig();
   console.log(`${cfg.useMock ? 'MOCK データ' : 'live API'} で実行${cfg.dryRun ? '（DRY_RUN）' : ''}`);
@@ -63,8 +80,6 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const state = await readRotationState();
-
   let rotation: RankedRotation;
   try {
     rotation = cfg.useMock ? getMockRotation(dayStartMs) : await fetchRankedRotation(cfg.apiKey);
@@ -74,36 +89,30 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  // 平常時に API を叩くのはこの1回だけで、シーズン変更を検知する唯一の機会でもある。
-  const recorded = recordEdge(state.edges, rotation.current, rotation.next, nowMs);
-  if (recorded.reset) {
-    console.warn('警告: ローテーションの並びが変わりました。学習済みのエッジを破棄して学習し直します。');
+  // 1日1回のこの観測が、定数のずれ＝シーズン変更を検知する唯一の機会。
+  const rotationWarnings = verifyRotation(rotation, RANKED_ROTATION);
+  const schedule = buildDaySchedule({ rotation, cycle: RANKED_ROTATION, dayStartMs });
+  for (const warning of [...rotationWarnings, ...schedule.warnings]) {
+    console.warn(`警告: ${warning}`);
   }
-  const cycle = deriveCycle(recorded.edges, rotation.current.map);
-  const schedule = buildDaySchedule({ rotation, cycle, dayStartMs });
-  for (const warning of schedule.warnings) console.warn(`警告: ${warning}`);
 
   const message = buildScheduleMessage(schedule.slots, dayStartMs);
   console.log(`---\n${message}\n---`);
   console.log(
     `枠数=${schedule.slots.length} / 枠長=${schedule.slotMinutes}分 / ` +
-      `循環=[${cycle.maps.join(' -> ')}]${cycle.closed ? '（確定）' : '（未確定）'} / ` +
+      `観測=${rotation.current.map} -> ${rotation.next?.map ?? '(next なし)'} / ` +
       `X換算=${twitterWeight(message)}/${TWITTER_LIMIT}`,
   );
 
   if (cfg.dryRun) {
-    console.log('DRY_RUN のため送信せず、state も更新しません。');
-    return 0;
+    console.log('DRY_RUN のため送信しません。');
+    return exitCodeFor(rotationWarnings);
   }
-
-  // 学習結果は投稿の成否と切り離して保存する。投稿に失敗しても観測はやり直さなくてよい。
-  // 中身が変わったときだけ書くので、Actions のコミットはローテが変わったときだけになる。
-  if (recorded.changed) await writeRotationState(recorded.edges);
-
   if (!cfg.webhook) {
     console.error('DISCORD_WEBHOOK_URL が未設定です。');
     return 1;
   }
+
   try {
     await sendDiscordNotification(cfg.webhook, message);
   } catch (err) {
@@ -115,7 +124,7 @@ async function main(): Promise<number> {
   await writeLastPostedDate(today);
   await signalPosted();
   console.log(`投稿しました（${today} / ${schedule.slots.length}枠）。`);
-  return 0;
+  return exitCodeFor(rotationWarnings);
 }
 
 main()

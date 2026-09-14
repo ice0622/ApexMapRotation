@@ -11,8 +11,6 @@
     "post": "node --env-file-if-exists=.env src/jobs/postSchedule.ts",
     "post:mock": "USE_MOCK=true node --env-file-if-exists=.env src/jobs/postSchedule.ts",
     "post:dry": "DRY_RUN=true node --env-file-if-exists=.env src/jobs/postSchedule.ts",
-    "observe": "node --env-file-if-exists=.env src/jobs/observeRotation.ts",
-    "observe:mock": "USE_MOCK=true node --env-file-if-exists=.env src/jobs/observeRotation.ts",
     "typecheck": "tsc --noEmit"
   },
   "license": "MIT",

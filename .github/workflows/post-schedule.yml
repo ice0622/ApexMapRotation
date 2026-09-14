@@ -22,13 +22,13 @@ on:
         type: boolean
         default: false
 
-# state/rotation.json を push するために必要。
+# リポジトリへ書き込むものが無いので読み取りだけでよい。
 permissions:
-  contents: write
+  contents: read
 
-# observe-rotation.yml と同じ state を書くので、同一グループで直列化する。
+# 遅延で実行が重なったときに二重投稿しないよう直列化する。
 concurrency:
-  group: rotation-state
+  group: post-schedule
   cancel-in-progress: false
 
 jobs:
@@ -72,18 +72,3 @@ jobs:
         with:
           path: .cache
           key: posted-marker-${{ github.run_id }}
-
-      # state/rotation.json はローテーションを学習したときしか変わらないので、
-      # コミットはシーズンが変わったときなど年に数回だけになる。
-      - name: Commit & push state if changed
-        run: |
-          if [ -n "$(git status --porcelain state/rotation.json)" ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add state/rotation.json
-            git commit -m "chore(state): update ranked rotation [skip ci]"
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
-            git push
-          else
-            echo "state に変更なし。コミットしません。"
-          fi
